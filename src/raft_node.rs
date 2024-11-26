@@ -23,7 +23,7 @@ use tonic::Request;
 struct MessageSender {
     message: RaftMessage,
     client: RaftServiceClient<tonic::transport::channel::Channel>,
-    client_id: u64,
+    client_id: String,
     chan: mpsc::Sender<Message>,
     max_retries: usize,
     timeout: Duration,
@@ -85,10 +85,10 @@ impl DerefMut for Peer {
 impl Peer {
     pub async fn new(addr: &str) -> Result<Peer> {
         // TODO: clean up this mess
-        info!("connecting to node at {}...", addr);
+        debug!("connecting to node at {}...", addr);
         let client = RaftServiceClient::connect(format!("http://{}", addr)).await?;
         let addr = addr.to_string();
-        info!("connected to node.");
+        debug!("connected to node at {}.", addr);
         Ok(Peer { addr, client })
     }
 }
@@ -96,7 +96,7 @@ impl Peer {
 pub struct RaftNode<S: Store> {
     inner: RawNode<MemStorage>,
     // the peer is optional, because an id can be reserved and later populated
-    pub peers: HashMap<u64, Option<Peer>>,
+    pub peers: HashMap<String, Option<Peer>>,
     pub rcv: mpsc::Receiver<Message>,
     pub snd: mpsc::Sender<Message>,
     store: S,
@@ -107,17 +107,18 @@ pub struct RaftNode<S: Store> {
 
 impl<S: Store + 'static + Send> RaftNode<S> {
     pub fn new_leader(
+        id: &str,
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
         store: S,
         logger: &slog::Logger,
     ) -> Self {
         let config = Config {
-            id: 1,
-            election_tick: 10,
+            id: id.to_string(),
+            election_tick: 100,
             // Heartbeat tick is for how long the leader needs to send
             // a heartbeat to keep alive.
-            heartbeat_tick: 3,
+            heartbeat_tick: 10,
             // Just for log
             ..Default::default()
         };
@@ -130,7 +131,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         // bring all nodes to the same initial state.
         s.mut_metadata().index = 1;
         s.mut_metadata().term = 1;
-        s.mut_metadata().mut_conf_state().voters = vec![1];
+        s.mut_metadata().mut_conf_state().voters = vec![id.to_string()];
 
         let mut storage = MemStorage::create();
         storage.apply_snapshot(s).unwrap();
@@ -155,23 +156,33 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     }
 
     pub fn new_follower(
+        id: &str,
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
-        id: u64,
         store: S,
         logger: &slog::Logger,
     ) -> Result<Self> {
         let config = Config {
-            id,
-            election_tick: 10,
+            id: id.to_string(),
+            election_tick: 100,
             // Heartbeat tick is for how long the leader needs to send
             // a heartbeat to keep alive.
-            heartbeat_tick: 3,
+            heartbeat_tick: 10,
             // Just for log
             ..Default::default()
         };
 
         config.validate().unwrap();
+
+        // let mut s = Snapshot::default();
+        // // Because we don't use the same configuration to initialize every node, so we use
+        // // a non-zero index to force new followers catch up logs by snapshot first, which will
+        // // bring all nodes to the same initial state.
+        // s.mut_metadata().index = 1;
+        // s.mut_metadata().term = 1;
+        // s.mut_metadata().mut_conf_state().voters = vec![id.clone()];
+        // let mut storage = MemStorage::create();
+        // storage.apply_snapshot(s).unwrap();
 
         let storage = MemStorage::create();
         let inner = RawNode::new(&config, storage, logger)?;
@@ -193,8 +204,8 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         })
     }
 
-    pub fn peer_mut(&mut self, id: u64) -> Option<&mut Peer> {
-        match self.peers.get_mut(&id) {
+    pub fn peer_mut(&mut self, id: &str) -> Option<&mut Peer> {
+        match self.peers.get_mut(id) {
             None => None,
             Some(v) => v.as_mut(),
         }
@@ -204,58 +215,38 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         self.inner.raft.leader_id == self.inner.raft.id
     }
 
-    pub fn id(&self) -> u64 {
-        self.raft.id
+    pub fn id(&self) -> &str {
+        &self.raft.id
     }
 
-    pub async fn add_peer(&mut self, addr: &str, id: u64) -> Result<()> {
+    pub async fn add_peer(&mut self, addr: &str) -> Result<()> {
         let peer = Peer::new(addr).await?;
-        self.peers.insert(id, Some(peer));
+        self.peers.insert(addr.to_string(), Some(peer));
         Ok(())
     }
 
-    fn leader(&self) -> u64 {
-        self.raft.leader_id
+    fn leader(&self) -> &str {
+        &self.raft.leader_id
     }
 
-    fn peer_addrs(&self) -> HashMap<u64, String> {
+    fn peer_addrs(&self) -> Vec<String> {
         self.peers
             .iter()
-            .filter_map(|(&id, peer)| {
-                peer.as_ref()
-                    .map(|Peer { addr, .. }| (id, addr.to_string()))
-            })
+            .filter_map(|(_, peer)| peer.as_ref().map(|Peer { addr, .. }| (addr.to_string())))
             .collect()
-    }
-
-    // reserve a slot to insert node on next node addition commit
-    fn reserve_next_peer_id(&mut self, addr: &str) -> u64 {
-        for (id, peer) in &mut self.peers.iter() {
-            if peer.as_ref().is_some_and(|x| x.addr == addr) {
-                let next_id = id.to_owned();
-                self.peers.insert(next_id, None);
-                return next_id.to_owned();
-            }
-        }
-
-        let next_id = self.peers.keys().max().cloned().unwrap_or(1);
-        // if assigned id is ourself, return next one
-        let next_id = std::cmp::max(next_id + 1, self.id());
-        self.peers.insert(next_id, None);
-        info!("reserving id {}", next_id);
-        next_id
     }
 
     fn send_wrong_leader(&self, channel: oneshot::Sender<RaftResponse>) {
         let leader_id = self.leader();
+        info!("not a leader, send my leader info {}", &leader_id);
         // leader can't be an empty node
-        let leader_addr = self.peers[&leader_id].as_ref().unwrap().addr.clone();
-        let raft_response = RaftResponse::WrongLeader {
-            leader_id,
-            leader_addr,
-        };
-        // TODO handle error here
-        let _ = channel.send(raft_response);
+        if let Some(Some(leader)) = self.peers.get(leader_id) {
+            info!("not a leader, send my leader info {}", &leader_id);
+            let leader_addr = leader.addr.clone();
+            let raft_response = RaftResponse::WrongLeader { leader_addr };
+            // TODO handle error here
+            let _ = channel.send(raft_response);
+        }
     }
 
     pub async fn run(mut self) -> Result<()> {
@@ -272,38 +263,50 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             }
             match timeout(heartbeat, self.rcv.recv()).await {
                 Ok(Some(Message::ConfigChange { chan, mut change })) => {
-                    // whenever a change id is 0, it's a message to self.
-                    if change.get_node_id() == 0 {
-                        change.set_node_id(self.id());
+                    debug!(
+                        "as {:?}, received config change: {:?}",
+                        self.inner.raft.state, change,
+                    );
+                    // whenever a change id is "0", it's a message to self.
+                    if change.get_node_id() == "" {
+                        change.set_node_id(self.id().to_string());
                     }
 
-                    if !self.is_leader() {
-                        // wrong leader send client cluster data
+                    if self.leader() == "" {
+                        let raft_response = RaftResponse::NoLeader {
+                            peer_addrs: self.peer_addrs(),
+                        };
+                        // TODO handle error here
+                        let _ = chan.send(raft_response);
                         // TODO: retry strategy in case of failure
+                        info!("no leader, try to become condidate");
+                        self.inner.raft.become_candidate();
+                        self.inner.apply_conf_change(&change)?;
+                    } else if !self.is_leader() {
                         self.send_wrong_leader(chan);
                     } else {
                         // leader assign new id to peer
-                        debug!("received request from: {}", change.get_node_id());
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                         client_send.insert(seq, chan);
                         self.propose_conf_change(serialize(&seq).unwrap(), change)?;
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
-                    debug!("raft message: to={} from={}", self.raft.id, m.from);
+                    debug!(
+                        "as {:?}, step raft message: {:?}, {:?}, ",
+                        &self.raft.state,
+                        &m,
+                        &self.inner.snap(),
+                    );
                     if let Ok(_a) = self.step(*m) {};
                 }
                 Ok(Some(Message::Propose { proposal, chan })) => {
+                    debug!(
+                        "as {:?}, received propose message: {:?}",
+                        &self.raft.state, &proposal
+                    );
                     if !self.is_leader() {
-                        // wrong leader send client cluster data
-                        let leader_id = self.leader();
-                        // leader can't be an empty node
-                        let leader_addr = self.peers[&leader_id].as_ref().unwrap().addr.clone();
-                        let raft_response = RaftResponse::WrongLeader {
-                            leader_id,
-                            leader_addr,
-                        };
-                        chan.send(raft_response).unwrap();
+                        self.send_wrong_leader(chan);
                     } else {
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
                         client_send.insert(seq, chan);
@@ -311,21 +314,8 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                         self.propose(seq, proposal).unwrap();
                     }
                 }
-                Ok(Some(Message::RequestId { addr, chan })) => {
-                    if !self.is_leader() {
-                        // TODO: retry strategy in case of failure
-                        info!("requested Id, but not leader");
-                        self.send_wrong_leader(chan);
-                    } else {
-                        chan.send(RaftResponse::IdReserved {
-                            leader_id: self.leader(),
-                            reserved_id: self.reserve_next_peer_id(&addr),
-                            peer_addrs: self.peer_addrs(),
-                        })
-                        .unwrap();
-                    }
-                }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
+                    info!("node {} is not reachable", node_id);
                     self.report_unreachable(node_id);
                 }
                 Ok(_) => unreachable!(),
@@ -357,10 +347,11 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
         if !ready.messages().is_empty() {
             // Send out the messages.
-            self.send_messages(ready.take_messages());
+            self.send_messages(ready.take_messages()).await;
         }
         if *ready.snapshot() != Snapshot::default() {
             let snapshot = ready.snapshot();
+            info!("update snapshot {:?}", snapshot);
             self.store.restore(snapshot.get_data()).await?;
             let store = self.mut_store();
             store.apply_snapshot(snapshot.clone())?;
@@ -383,7 +374,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
         if !ready.persisted_messages().is_empty() {
             // Send out the persisted messages come from the node.
-            self.send_messages(ready.take_persisted_messages());
+            self.send_messages(ready.take_persisted_messages()).await;
         }
 
         let mut light_rd = self.advance(ready);
@@ -394,7 +385,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         }
 
         // Send out the messages.
-        self.send_messages(light_rd.take_messages());
+        self.send_messages(light_rd.take_messages()).await;
 
         // Apply all committed entries.
         self.handle_committed_entries(light_rd.take_committed_entries(), client_send)
@@ -405,20 +396,20 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         Ok(())
     }
 
-    fn send_messages(&mut self, msgs: Vec<RaftMessage>) {
+    async fn send_messages(&mut self, msgs: Vec<RaftMessage>) {
         for msg in msgs {
-            debug!(
-                "light ready message from {} to {}",
-                msg.get_from(),
-                msg.get_to()
-            );
-            let client = match self.peer_mut(msg.get_to()) {
+            // debug!("send raft message {:?}", msg);
+            let to_addr = msg.get_to();
+            let client = match self.peer_mut(to_addr) {
                 Some(ref peer) => peer.client.clone(),
-                None => continue,
+                None => match self.add_peer(to_addr).await {
+                    Ok(_) => self.peer_mut(to_addr).unwrap().client.clone(),
+                    Err(_) => continue,
+                },
             };
             let message_sender = MessageSender {
-                client_id: msg.get_to(),
-                client: client.clone(),
+                client_id: to_addr.to_string(),
+                client: client,
                 chan: self.snd.clone(),
                 message: msg,
                 timeout: Duration::from_millis(100),
@@ -462,15 +453,16 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         match change_type {
             ConfChangeType::AddNode => {
                 let addr: String = deserialize(change.get_context())?;
-                info!("adding {} ({}) to peers", addr, id);
-                self.add_peer(&addr, id).await.unwrap();
+                info!("adding {} to peers", addr);
+                self.add_peer(&addr).await.unwrap();
             }
             ConfChangeType::RemoveNode => {
                 if change.get_node_id() == self.id() {
                     self.should_quit = true;
                     warn!("quiting the cluster");
                 } else {
-                    self.peers.remove(&change.get_node_id());
+                    warn!("removing peer {} from cluster", change.get_node_id());
+                    self.peers.remove(change.get_node_id());
                 }
             }
             _ => unimplemented!(),
@@ -490,7 +482,6 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         if let Some(sender) = senders.remove(&seq) {
             let response = match change_type {
                 ConfChangeType::AddNode => RaftResponse::JoinSuccess {
-                    assigned_id: id,
                     peer_addrs: self.peer_addrs(),
                 },
                 ConfChangeType::RemoveNode => RaftResponse::Ok,

@@ -111,18 +111,16 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
+    let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let (raft_handle, mailbox) = match options.peer_addr {
+    let raft_handle = match options.peer_addr {
         Some(addr) => {
             log::info!("running in follower mode");
-            let handle = tokio::spawn(raft.join(addr));
-            (handle, mailbox)
+            raft.join(&addr).await?
         }
         None => {
             log::info!("running in leader mode");
-            let handle = tokio::spawn(raft.lead());
-            (handle, mailbox)
+            raft.lead().await?
         }
     };
 

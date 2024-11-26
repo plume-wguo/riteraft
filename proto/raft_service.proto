@@ -4,9 +4,8 @@ package raftservice;
 import "eraftpb.proto";
 
 service RaftService {
-  rpc RequestId(RequestIdArgs) returns (IdRequestReponse) {}
-  rpc ChangeConfig(eraftpb.ConfChange) returns (RaftResponse) {}
-  rpc SendMessage(eraftpb.Message) returns (RaftResponse) {}
+  rpc ChangeConfig(eraftpb.ConfChange) returns (RaftServiceResponse) {}
+  rpc SendMessage(eraftpb.Message) returns (RaftServiceResponse) {}
 }
 
 enum ResultCode {
@@ -19,13 +18,9 @@ message Proposal {
   bytes inner = 1;
 }
 
-message IdRequestReponse{
+message RaftServiceResponse{
   ResultCode code = 1;
   bytes data = 2;
-}
-
-message RequestIdArgs {
-  string addr = 1;
 }
 
 message Entry {

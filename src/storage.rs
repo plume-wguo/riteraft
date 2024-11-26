@@ -61,7 +61,7 @@ impl LogStore for MemStorage {
 
     #[inline]
     fn create_snapshot(&mut self, data: Vec<u8>) -> Result<()> {
-        let mut snapshot = self.core.snapshot(0, 0)?;
+        let mut snapshot = self.core.snapshot(0, 0.to_string())?;
         snapshot.set_data(data);
         self.snapshot = snapshot;
         Ok(())
@@ -117,7 +117,7 @@ impl Storage for MemStorage {
     }
 
     #[inline]
-    fn snapshot(&self, _request_index: u64, _to: u64) -> raft::Result<Snapshot> {
+    fn snapshot(&self, _request_index: u64, _to: String) -> raft::Result<Snapshot> {
         Ok(self.snapshot.clone())
     }
 }

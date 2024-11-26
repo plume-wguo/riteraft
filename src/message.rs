@@ -6,23 +6,11 @@ use tokio::sync::oneshot::Sender;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RaftResponse {
-    WrongLeader {
-        leader_id: u64,
-        leader_addr: String,
-    },
-    JoinSuccess {
-        assigned_id: u64,
-        peer_addrs: HashMap<u64, String>,
-    },
-    IdReserved {
-        leader_id: u64,
-        reserved_id: u64,
-        peer_addrs: HashMap<u64, String>,
-    },
+    NoLeader { peer_addrs: Vec<String> },
+    WrongLeader { leader_addr: String },
+    JoinSuccess { peer_addrs: Vec<String> },
     Error,
-    Response {
-        data: Vec<u8>,
-    },
+    Response { data: Vec<u8> },
     Ok,
 }
 
@@ -36,12 +24,8 @@ pub enum Message {
         change: ConfChange,
         chan: Sender<RaftResponse>,
     },
-    RequestId {
-        addr: String,
-        chan: Sender<RaftResponse>,
-    },
     ReportUnreachable {
-        node_id: u64,
+        node_id: String,
     },
     Raft(Box<RaftMessage>),
 }

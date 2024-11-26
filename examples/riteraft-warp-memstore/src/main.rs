@@ -112,23 +112,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let logger = slog::Logger::root(drain, slog_o!("version" => env!("CARGO_PKG_VERSION")));
 
     // converts log to slog
-    let _log_guard = slog_stdlog::init().unwrap();
+    let _scope_guard = slog_scope::set_global_logger(logger.clone());
+    let _log_guard = slog_stdlog::init_with_level(log::Level::Info);
 
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let raft = Raft::new(options.raft_addr, store.clone(), logger.clone());
+    let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let (raft_handle, mailbox) = match options.peer_addr {
+    let raft_handle = match options.peer_addr {
         Some(addr) => {
             info!("running in follower mode");
-            let handle = tokio::spawn(raft.join(addr));
-            (handle, mailbox)
+            raft.join(&addr).await?
         }
         None => {
             info!("running in leader mode");
-            let handle = tokio::spawn(raft.lead());
-            (handle, mailbox)
+            raft.lead().await?
         }
     };
 
@@ -150,6 +149,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let routes = put_kv.or(get_kv).or(leave_kv);
 
     if let Some(addr) = options.web_server {
+        info!("using web addr {}", &addr);
         let _server = tokio::spawn(async move {
             warp::serve(routes)
                 .run(SocketAddr::from_str(&addr).unwrap())
