@@ -1,3 +1,4 @@
+use crate::message::RaftRole;
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -313,6 +314,37 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     );
                     if let Ok(_a) = self.step(*m) {};
                 }
+                Ok(Some(Message::Leave { reply_chan })) => {
+                    debug!("as {:?}, received leave message", &self.raft.state,);
+                    let node_id = self.id().to_string();
+                    let leader_addr = self.leader().to_string();
+                    let is_leader = self.is_leader();
+                    if leader_addr != "" {
+                        if !is_leader {
+                            let mut change = ConfChange::default();
+                            change.set_node_id(node_id);
+                            change.set_change_type(ConfChangeType::RemoveNode);
+                            if let Some(p) = self.peer_mut(&leader_addr) {
+                                let _ = p.client.change_config(Request::new(change.clone())).await;
+                                let _ = reply_chan.send(RaftResponse::Ok);
+                            } else {
+                                let _ = reply_chan.send(RaftResponse::NoLeader {
+                                    peer_addrs: self.peer_addrs(),
+                                });
+                            };
+                        } else {
+                            self.propose_remove_node(&node_id)?;
+                            let _ = reply_chan.send(RaftResponse::Ok);
+                        }
+                    }
+                }
+                Ok(Some(Message::RaftState { reply_chan })) => {
+                    debug!("as {:?}, received role state message", &self.raft.state,);
+                    let raft_response = RaftResponse::RaftState {
+                        role: RaftRole::from(self.raft.state),
+                    };
+                    let _ = reply_chan.send(raft_response);
+                }
                 Ok(Some(Message::Propose {
                     proposal,
                     reply_chan,
@@ -336,12 +368,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     if let Some(peer) = self.peer_mut(&node_id) {
                         let cnt = peer.inc_get_unreachble_cnt();
                         if cnt > 20 {
-                            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                            let mut change = ConfChange::default();
-                            change.set_node_id(node_id.clone());
-                            change.set_change_type(ConfChangeType::RemoveNode);
-                            change.set_context(serialize(&self.id())?);
-                            self.propose_conf_change(serialize(&seq).unwrap(), change)?;
+                            self.propose_remove_node(&node_id)?;
                         }
                     }
                 }
@@ -542,6 +569,21 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             let _ = store.create_snapshot(snapshot);
         }
         Ok(())
+    }
+
+    fn propose_remove_node(&mut self, node_id: &str) -> Result<()> {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let mut change = ConfChange::default();
+        change.set_node_id(node_id.to_string());
+        change.set_change_type(ConfChangeType::RemoveNode);
+        change.set_context(serialize(&self.id())?);
+        match self.propose_conf_change(serialize(&seq).unwrap(), change) {
+            Ok(_) => Ok(()),
+            Err(_) => {
+                error!("failed to propose removing node {}", node_id);
+                Ok(())
+            }
+        }
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse};
+use crate::message::{Message, RaftResponse, RaftRole};
 use crate::raft_node::RaftNode;
 use crate::raft_server::RaftServer;
 use crate::raft_service::raft_service_client::RaftServiceClient;
@@ -52,21 +52,23 @@ impl Mailbox {
     }
 
     pub async fn leave(&self) -> Result<()> {
-        let mut change = ConfChange::default();
-        // set node id to 0, the node will set it to self when it receives it.
-        change.set_node_id("".to_string());
-        change.set_change_type(ConfChangeType::RemoveNode);
         let sender = self.0.clone();
         let (chan, rx) = oneshot::channel();
-        match sender
-            .send(Message::ConfigChange {
-                change,
-                reply_chan: chan,
-            })
-            .await
-        {
+        match sender.send(Message::Leave { reply_chan: chan }).await {
             Ok(_) => match rx.await {
-                Ok(RaftResponse::Ok) => Ok(()),
+                Ok(RaftResponse::Ok {}) => Ok(()),
+                _ => Err(Error::Unknown),
+            },
+            _ => Err(Error::Unknown),
+        }
+    }
+
+    pub async fn role(&self) -> Result<RaftRole> {
+        let sender = self.0.clone();
+        let (chan, rx) = oneshot::channel();
+        match sender.send(Message::RaftState { reply_chan: chan }).await {
+            Ok(_) => match rx.await {
+                Ok(RaftResponse::RaftState { role }) => Ok(role),
                 _ => Err(Error::Unknown),
             },
             _ => Err(Error::Unknown),
@@ -180,56 +182,5 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
         error!("failed to join cluster with any peers");
         Err(Error::JoinError)
-    }
-
-    /// sends a RemoveNode message to commit to local raft node. This fails if the local node is not the leader
-    pub async fn leave(&self) -> Result<()> {
-        let mut change = ConfChange::default();
-        // set node id to 0, the node will set it to self when it receives it.
-        change.set_node_id("".to_string());
-        change.set_change_type(ConfChangeType::RemoveNode);
-        let sender = self.mailbox();
-        let (tx, rx) = oneshot::channel();
-        let config_change = Message::ConfigChange {
-            change: change.clone(),
-            reply_chan: tx,
-        };
-        match sender.0.send(config_change).await {
-            Ok(_) => match rx.await {
-                Ok(RaftResponse::Ok) => Ok(()),
-                Ok(RaftResponse::WrongLeader { mut leader_addr }) => loop {
-                    if let Ok(mut client) =
-                        RaftServiceClient::connect(format!("http://{}", &leader_addr)).await
-                    {
-                        let response = client
-                            .change_config(Request::new(change.clone()))
-                            .await?
-                            .into_inner();
-                        match response.code() {
-                            ResultCode::WrongLeader => {
-                                let new_addr: String = deserialize(&response.data)?;
-                                leader_addr = new_addr.clone();
-                                info!("call leave with new peer at {}", leader_addr);
-                                continue;
-                            }
-                            ResultCode::Ok => return Ok(()),
-                            ResultCode::Error => {
-                                error!(
-                                    "leave cluster failed with unknown error from leader at {}",
-                                    leader_addr
-                                );
-                                return Err(Error::Unknown);
-                            }
-                        }
-                    } else {
-                        return Err(Error::Io(
-                            "failed to connect raft leader grpc endpoint".to_string(),
-                        ));
-                    }
-                },
-                _ => Err(Error::Unknown),
-            },
-            _ => Err(Error::Unknown),
-        }
     }
 }
