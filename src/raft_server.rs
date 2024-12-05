@@ -51,7 +51,7 @@ impl RaftService for RaftServer {
         let (tx, rx) = oneshot::channel();
         let message = Message::ConfigChange {
             change: change,
-            chan: tx,
+            reply_chan: tx,
         };
 
         match sender.send(message).await {

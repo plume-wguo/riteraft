@@ -89,7 +89,7 @@ async fn put(
 ) -> Result<impl warp::Reply, Infallible> {
     let message = Message::Insert { key, value };
     let message = serialize(&message).unwrap();
-    let result = mailbox.send(message).await.unwrap();
+    let result = mailbox.propose(message).await.unwrap();
     let result: String = deserialize(&result).unwrap();
     Ok(reply::json(&result))
 }
@@ -120,16 +120,18 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let raft_handle = match options.peer_addr {
+    // let raft_handle = match options.peer_addr {
+    let node = match options.peer_addr {
         Some(addr) => {
             info!("running in follower mode");
-            raft.join(&addr).await?
+            raft.join(vec![&addr]).await?
         }
         None => {
             info!("running in leader mode");
             raft.lead().await?
         }
     };
+    let raft_handle = tokio::spawn(node.run());
 
     let put_kv = warp::get()
         .and(warp::path!("put" / String / String))

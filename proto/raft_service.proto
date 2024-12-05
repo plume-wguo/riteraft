@@ -6,6 +6,7 @@ import "eraftpb.proto";
 service RaftService {
   rpc ChangeConfig(eraftpb.ConfChange) returns (RaftServiceResponse) {}
   rpc SendMessage(eraftpb.Message) returns (RaftServiceResponse) {}
+  // rpc Propose(Proposal) returns (RaftServiceResponse) {}
 }
 
 enum ResultCode {
@@ -23,11 +24,11 @@ message RaftServiceResponse{
   bytes data = 2;
 }
 
-message Entry {
-  uint64 key    = 1; 
-  string value  = 2;
-}
-
-message RaftResponse {
-  bytes inner = 2;
-}
+// message Entry {
+//   uint64 key    = 1; 
+//   string value  = 2;
+// }
+//
+// message RaftResponse {
+//   bytes inner = 2;
+// }

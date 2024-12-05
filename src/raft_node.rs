@@ -66,6 +66,7 @@ impl MessageSender {
 pub struct Peer {
     addr: String,
     client: RaftServiceClient<Channel>,
+    unreachable_cnt: u8,
 }
 
 impl Deref for Peer {
@@ -89,7 +90,16 @@ impl Peer {
         let client = RaftServiceClient::connect(format!("http://{}", addr)).await?;
         let addr = addr.to_string();
         debug!("connected to node at {}.", addr);
-        Ok(Peer { addr, client })
+        Ok(Peer {
+            addr,
+            client,
+            unreachable_cnt: 0,
+        })
+    }
+
+    pub fn inc_get_unreachble_cnt(&mut self) -> u8 {
+        self.unreachable_cnt += 1;
+        self.unreachable_cnt
     }
 }
 
@@ -262,7 +272,10 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                 return Ok(());
             }
             match timeout(heartbeat, self.rcv.recv()).await {
-                Ok(Some(Message::ConfigChange { chan, mut change })) => {
+                Ok(Some(Message::ConfigChange {
+                    reply_chan,
+                    mut change,
+                })) => {
                     debug!(
                         "as {:?}, received config change: {:?}",
                         self.inner.raft.state, change,
@@ -277,17 +290,17 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                             peer_addrs: self.peer_addrs(),
                         };
                         // TODO handle error here
-                        let _ = chan.send(raft_response);
+                        let _ = reply_chan.send(raft_response);
                         // TODO: retry strategy in case of failure
                         info!("no leader, try to become condidate");
                         self.inner.raft.become_candidate();
                         self.inner.apply_conf_change(&change)?;
                     } else if !self.is_leader() {
-                        self.send_wrong_leader(chan);
+                        self.send_wrong_leader(reply_chan);
                     } else {
                         // leader assign new id to peer
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                        client_send.insert(seq, chan);
+                        client_send.insert(seq, reply_chan);
                         self.propose_conf_change(serialize(&seq).unwrap(), change)?;
                     }
                 }
@@ -300,23 +313,37 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     );
                     if let Ok(_a) = self.step(*m) {};
                 }
-                Ok(Some(Message::Propose { proposal, chan })) => {
+                Ok(Some(Message::Propose {
+                    proposal,
+                    reply_chan,
+                })) => {
                     debug!(
                         "as {:?}, received propose message: {:?}",
                         &self.raft.state, &proposal
                     );
                     if !self.is_leader() {
-                        self.send_wrong_leader(chan);
+                        self.send_wrong_leader(reply_chan);
                     } else {
                         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                        client_send.insert(seq, chan);
+                        client_send.insert(seq, reply_chan);
                         let seq = serialize(&seq).unwrap();
                         self.propose(seq, proposal).unwrap();
                     }
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
-                    info!("node {} is not reachable", node_id);
-                    self.report_unreachable(node_id);
+                    info!("node {} is not reachable", &node_id);
+                    self.report_unreachable(node_id.clone());
+                    if let Some(peer) = self.peer_mut(&node_id) {
+                        let cnt = peer.inc_get_unreachble_cnt();
+                        if cnt > 20 {
+                            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+                            let mut change = ConfChange::default();
+                            change.set_node_id(node_id.clone());
+                            change.set_change_type(ConfChangeType::RemoveNode);
+                            change.set_context(serialize(&self.id())?);
+                            self.propose_conf_change(serialize(&seq).unwrap(), change)?;
+                        }
+                    }
                 }
                 Ok(_) => unreachable!(),
                 Err(_) => (),

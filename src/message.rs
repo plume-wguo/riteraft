@@ -18,11 +18,11 @@ pub enum RaftResponse {
 pub enum Message {
     Propose {
         proposal: Vec<u8>,
-        chan: Sender<RaftResponse>,
+        reply_chan: Sender<RaftResponse>,
     },
     ConfigChange {
         change: ConfChange,
-        chan: Sender<RaftResponse>,
+        reply_chan: Sender<RaftResponse>,
     },
     ReportUnreachable {
         node_id: String,

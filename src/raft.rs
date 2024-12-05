@@ -1,15 +1,15 @@
 use crate::error::{Error, Result};
 use crate::message::{Message, RaftResponse};
-use crate::raft_node::Peer;
 use crate::raft_node::RaftNode;
 use crate::raft_server::RaftServer;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::ResultCode;
+use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
-use log::{info, warn};
+use log::{error, info};
 use raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
@@ -24,24 +24,27 @@ pub trait Store {
     async fn restore(&mut self, snapshot: &[u8]) -> Result<()>;
 }
 
-/// A mailbox to send messages to a ruung raft node.
+/// A mailbox to send messages to a local raft node.
+/// to send message to remote raft node, use MessageSender
 #[derive(Clone)]
 pub struct Mailbox(mpsc::Sender<Message>);
 
 impl Mailbox {
-    /// sends a proposal message to commit to the node. This fails if the current node is not the
-    /// leader
-    pub async fn send(&self, message: Vec<u8>) -> Result<Vec<u8>> {
+    /// sends a Propose message to commit to local raft node. This fails if the local node is not the leader
+    pub async fn propose(&self, message: Vec<u8>) -> Result<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
         let proposal = Message::Propose {
             proposal: message,
-            chan: tx,
+            reply_chan: tx,
         };
         let sender = self.0.clone();
         // TODO make timeout duration a variable
         match sender.send(proposal).await {
             Ok(_) => match timeout(Duration::from_secs(2), rx).await {
                 Ok(Ok(RaftResponse::Response { data })) => Ok(data),
+                Ok(Ok(RaftResponse::WrongLeader { leader_addr })) => {
+                    Err(Error::WrongLeader(leader_addr))
+                }
                 _ => Err(Error::Unknown),
             },
             _ => Err(Error::Unknown),
@@ -55,7 +58,13 @@ impl Mailbox {
         change.set_change_type(ConfChangeType::RemoveNode);
         let sender = self.0.clone();
         let (chan, rx) = oneshot::channel();
-        match sender.send(Message::ConfigChange { change, chan }).await {
+        match sender
+            .send(Message::ConfigChange {
+                change,
+                reply_chan: chan,
+            })
+            .await
+        {
             Ok(_) => match rx.await {
                 Ok(RaftResponse::Ok) => Ok(()),
                 _ => Err(Error::Unknown),
@@ -79,8 +88,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let (tx, rx) = mpsc::channel(100);
         Self {
             store,
-            tx,
-            rx,
+            tx: tx,
+            rx: rx,
             addr: addr.to_string(),
             logger,
         }
@@ -93,7 +102,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     /// Create a new leader for the cluster. There has to be exactly one node in the
     /// cluster that is initialised that way
-    pub async fn lead(self) -> Result<JoinHandle<Result<()>>> {
+    // pub async fn lead(self) -> Result<JoinHandle<Result<()>>> {
+    pub async fn lead(self) -> Result<RaftNode<S>> {
         let addr = self.addr.clone();
         let node = RaftNode::new_leader(
             &self.addr,
@@ -104,15 +114,17 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         );
         let server = RaftServer::new(self.tx, addr);
         let _server_handle = tokio::spawn(server.run());
-        let node_handle = tokio::spawn(node.run());
-        Ok(node_handle)
+        // let node_handle = tokio::spawn(node.run());
+        // Ok(node_handle)
+        Ok(node)
     }
 
-    /// Try using node addr as an id to join cluster at `addr`, or finding it if
-    /// `addr` is not the current leader of the cluster, it will use returned new addr
+    /// Try using node addr as an id to join cluster at `peers`, or finding it if
+    /// `peers` is not the current leader of the cluster, it will use returned new addr
     /// join will try to remove this node and add again
-    pub async fn join(self, addr: &str) -> Result<JoinHandle<Result<()>>> {
-        info!("attemping to join cluster using peer: {}", &addr);
+    // pub async fn join(self, peers: Vec<&str>) -> Result<JoinHandle<Result<()>>> {
+    pub async fn join(self, peers: Vec<&str>) -> Result<RaftNode<S>> {
+        info!("attemping to join cluster using peers: {:?}", &peers);
         let server = RaftServer::new(self.tx.clone(), self.addr.clone());
         let _server_handle = tokio::spawn(server.run());
         let node = RaftNode::new_follower(
@@ -123,41 +135,101 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             &self.logger,
         )
         .unwrap();
-        let mut leader_addr = addr.to_string();
         let mut change = ConfChange::default();
         change.set_node_id(self.addr.clone());
         // try to remove node firstly
         change.set_change_type(ConfChangeType::RemoveNode);
         change.set_context(serialize(&self.addr)?);
-        loop {
+        for addr in peers {
+            let mut leader_addr = addr.to_string();
             if let Ok(mut client) =
                 RaftServiceClient::connect(format!("http://{}", &leader_addr)).await
             {
-                let response = client
-                    .change_config(Request::new(change.clone()))
-                    .await?
-                    .into_inner();
-                match response.code() {
-                    ResultCode::WrongLeader => {
-                        let addr: String = deserialize(&response.data)?;
-                        leader_addr = addr;
-                        info!("rejoin with new peer at {}", leader_addr);
-                        continue;
-                    }
-                    ResultCode::Ok => {
-                        if change.change_type == ConfChangeType::AddNode as i32 {
-                            info!("join successfully with leader at {}", leader_addr);
-                            let node_handle = tokio::spawn(node.run());
-                            return Ok(node_handle);
-                        } else if change.change_type == ConfChangeType::RemoveNode as i32 {
-                            // removed node, add node again
-                            change.set_change_type(ConfChangeType::AddNode);
+                loop {
+                    let response = client
+                        .change_config(Request::new(change.clone()))
+                        .await?
+                        .into_inner();
+                    match response.code() {
+                        ResultCode::WrongLeader => {
+                            let addr: String = deserialize(&response.data)?;
+                            leader_addr = addr;
+                            info!("rejoin with new peer at {}", leader_addr);
                             continue;
                         }
+                        ResultCode::Ok => {
+                            if change.change_type == ConfChangeType::AddNode as i32 {
+                                info!("join successfully with leader at {}", leader_addr);
+                                // let node_handle = tokio::spawn(node.run());
+                                // return Ok(node_handle);
+                                return Ok(node);
+                            } else if change.change_type == ConfChangeType::RemoveNode as i32 {
+                                // removed node, add node again
+                                change.set_change_type(ConfChangeType::AddNode);
+                                continue;
+                            }
+                        }
+                        _ => break,
                     }
-                    ResultCode::Error => continue,
                 }
+            } else {
+                // try next peer
+                continue;
             }
+        }
+
+        error!("failed to join cluster with any peers");
+        Err(Error::JoinError)
+    }
+
+    /// sends a RemoveNode message to commit to local raft node. This fails if the local node is not the leader
+    pub async fn leave(&self) -> Result<()> {
+        let mut change = ConfChange::default();
+        // set node id to 0, the node will set it to self when it receives it.
+        change.set_node_id("".to_string());
+        change.set_change_type(ConfChangeType::RemoveNode);
+        let sender = self.mailbox();
+        let (tx, rx) = oneshot::channel();
+        let config_change = Message::ConfigChange {
+            change: change.clone(),
+            reply_chan: tx,
+        };
+        match sender.0.send(config_change).await {
+            Ok(_) => match rx.await {
+                Ok(RaftResponse::Ok) => Ok(()),
+                Ok(RaftResponse::WrongLeader { mut leader_addr }) => loop {
+                    if let Ok(mut client) =
+                        RaftServiceClient::connect(format!("http://{}", &leader_addr)).await
+                    {
+                        let response = client
+                            .change_config(Request::new(change.clone()))
+                            .await?
+                            .into_inner();
+                        match response.code() {
+                            ResultCode::WrongLeader => {
+                                let new_addr: String = deserialize(&response.data)?;
+                                leader_addr = new_addr.clone();
+                                info!("call leave with new peer at {}", leader_addr);
+                                continue;
+                            }
+                            ResultCode::Ok => return Ok(()),
+                            ResultCode::Error => {
+                                error!(
+                                    "leave cluster failed with unknown error from leader at {}",
+                                    leader_addr
+                                );
+                                return Err(Error::Unknown);
+                            }
+                        }
+                    } else {
+                        return Err(Error::Io(
+                            "failed to connect raft leader grpc endpoint".to_string(),
+                        ));
+                    }
+                },
+                _ => Err(Error::Unknown),
+            },
+            _ => Err(Error::Unknown),
         }
     }
 }

@@ -16,6 +16,8 @@ pub enum Error {
     Io(String),
     #[error("unexpected error")]
     Other(#[source] Box<dyn std::error::Error + Sync + Send + 'static>),
+    #[error("wrong leader : {0}")]
+    WrongLeader(String),
     #[error("unexpected error")]
     Unknown,
 }

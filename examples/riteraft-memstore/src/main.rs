@@ -78,7 +78,7 @@ async fn put(
         value: path.1.clone(),
     };
     let message = serialize(&message).unwrap();
-    let result = data.0.send(message).await.unwrap();
+    let result = data.0.propose(message).await.unwrap();
     let result: String = deserialize(&result).unwrap();
     format!("{:?}", result)
 }
@@ -113,16 +113,17 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
 
     let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let raft_handle = match options.peer_addr {
+    let node = match options.peer_addr {
         Some(addr) => {
             log::info!("running in follower mode");
-            raft.join(&addr).await?
+            raft.join(vec![&addr]).await?
         }
         None => {
             log::info!("running in leader mode");
             raft.lead().await?
         }
     };
+    let raft_handle = tokio::spawn(node.run());
 
     if let Some(addr) = options.web_server {
         let _server = tokio::spawn(
