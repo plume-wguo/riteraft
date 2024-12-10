@@ -1,20 +1,19 @@
-use crate::message::RaftRole;
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
-
 use crate::error::Result;
-use crate::message::{Message, RaftResponse};
+use crate::message::{Message, Response};
+use crate::message::{RaftChange, RaftRole};
 use crate::raft::Store;
 use crate::raft_service::raft_service_client::RaftServiceClient;
+use crate::raft_service::Proposal;
 use crate::storage::{LogStore, MemStorage};
-
 use bincode::{deserialize, serialize};
 use log::*;
 use prost::Message as PMessage;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
 use raft::{prelude::*, raw_node::RawNode, Config};
+use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
@@ -25,7 +24,7 @@ struct MessageSender {
     message: RaftMessage,
     client: RaftServiceClient<tonic::transport::channel::Channel>,
     client_id: String,
-    chan: mpsc::Sender<Message>,
+    reply_tx: mpsc::Sender<Message>,
     max_retries: usize,
     timeout: Duration,
 }
@@ -37,7 +36,7 @@ impl MessageSender {
         let mut current_retry = 0usize;
         loop {
             let message_request = Request::new(self.message.clone());
-            match self.client.send_message(message_request).await {
+            match self.client.send_raft_message(message_request).await {
                 Ok(_) => {
                     return;
                 }
@@ -51,7 +50,7 @@ impl MessageSender {
                             self.max_retries, e
                         );
                         let _ = self
-                            .chan
+                            .reply_tx
                             .send(Message::ReportUnreachable {
                                 node_id: self.client_id,
                             })
@@ -247,14 +246,14 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             .collect()
     }
 
-    fn send_wrong_leader(&self, channel: oneshot::Sender<RaftResponse>) {
+    fn send_wrong_leader(&self, channel: oneshot::Sender<Response>) {
         let leader_id = self.leader();
         info!("not a leader, send my leader info {}", &leader_id);
         // leader can't be an empty node
         if let Some(Some(leader)) = self.peers.get(leader_id) {
             info!("not a leader, send my leader info {}", &leader_id);
             let leader_addr = leader.addr.clone();
-            let raft_response = RaftResponse::WrongLeader { leader_addr };
+            let raft_response = Response::WrongLeader { leader_addr };
             // TODO handle error here
             let _ = channel.send(raft_response);
         }
@@ -287,7 +286,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     }
 
                     if self.leader() == "" {
-                        let raft_response = RaftResponse::NoLeader {
+                        let raft_response = Response::NoLeader {
                             peer_addrs: self.peer_addrs(),
                         };
                         // TODO handle error here
@@ -326,22 +325,45 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                             change.set_change_type(ConfChangeType::RemoveNode);
                             if let Some(p) = self.peer_mut(&leader_addr) {
                                 let _ = p.client.change_config(Request::new(change.clone())).await;
-                                let _ = reply_chan.send(RaftResponse::Ok);
+                                let _ = reply_chan.send(Response::Ok);
                             } else {
-                                let _ = reply_chan.send(RaftResponse::NoLeader {
+                                let _ = reply_chan.send(Response::NoLeader {
                                     peer_addrs: self.peer_addrs(),
                                 });
                             };
                         } else {
-                            self.propose_remove_node(&node_id)?;
-                            let _ = reply_chan.send(RaftResponse::Ok);
+                            self.propose_remove_node(&node_id).await?;
+                            let _ = reply_chan.send(Response::Ok);
                         }
                     }
                 }
+                Ok(Some(Message::ServiceProposalRequest {
+                    request,
+                    reply_chan,
+                })) => {
+                    debug!(
+                        "as {:?}, received request service proposal message",
+                        &self.raft.state,
+                    );
+                    // maybe just send message to itself if it's leader
+                    let leader_addr = self.leader().to_string();
+                    if let Some(p) = self.peer_mut(&leader_addr) {
+                        let _ = p
+                            .client
+                            .request_service_proposal(Request::new(Proposal { inner: request }))
+                            .await;
+                        let _ = reply_chan.send(Response::Ok);
+                    } else {
+                        let _ = reply_chan.send(Response::NoLeader {
+                            peer_addrs: self.peer_addrs(),
+                        });
+                    }
+                }
                 Ok(Some(Message::RaftState { reply_chan })) => {
-                    debug!("as {:?}, received role state message", &self.raft.state,);
-                    let raft_response = RaftResponse::RaftState {
+                    debug!("as {:?}, received role state message", &self.raft.state);
+                    let raft_response = Response::RaftState {
                         role: RaftRole::from(self.raft.state),
+                        leader_id: self.leader().to_string(),
                     };
                     let _ = reply_chan.send(raft_response);
                 }
@@ -368,7 +390,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     if let Some(peer) = self.peer_mut(&node_id) {
                         let cnt = peer.inc_get_unreachble_cnt();
                         if cnt > 20 {
-                            self.propose_remove_node(&node_id)?;
+                            self.propose_remove_node(&node_id).await?;
                         }
                     }
                 }
@@ -391,7 +413,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
     async fn on_ready(
         &mut self,
-        client_send: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        client_send: &mut HashMap<u64, oneshot::Sender<Response>>,
     ) -> Result<()> {
         if !self.has_ready() {
             return Ok(());
@@ -464,7 +486,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             let message_sender = MessageSender {
                 client_id: to_addr.to_string(),
                 client: client,
-                chan: self.snd.clone(),
+                reply_tx: self.snd.clone(),
                 message: msg,
                 timeout: Duration::from_millis(100),
                 max_retries: 5,
@@ -476,7 +498,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     async fn handle_committed_entries(
         &mut self,
         committed_entries: Vec<Entry>,
-        client_send: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        client_send: &mut HashMap<u64, oneshot::Sender<Response>>,
     ) -> Result<()> {
         // Fitler out empty entries produced by new elected leaders.
         for entry in committed_entries {
@@ -496,24 +518,22 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     async fn handle_config_change(
         &mut self,
         entry: &Entry,
-        senders: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        senders: &mut HashMap<u64, oneshot::Sender<Response>>,
     ) -> Result<()> {
         let seq: u64 = deserialize(entry.get_context())?;
         let change: ConfChange = PMessage::decode(entry.get_data())?;
-        let id = change.get_node_id();
-
         let change_type = change.get_change_type();
 
         match change_type {
             ConfChangeType::AddNode => {
                 let addr: String = deserialize(change.get_context())?;
-                info!("adding {} to peers", addr);
+                info!("adding node {} to peers", addr);
                 self.add_peer(&addr).await.unwrap();
             }
             ConfChangeType::RemoveNode => {
                 if change.get_node_id() == self.id() {
                     self.should_quit = true;
-                    warn!("quiting the cluster");
+                    warn!("node {} quiting the cluster", &self.id());
                 } else {
                     warn!("removing peer {} from cluster", change.get_node_id());
                     self.peers.remove(change.get_node_id());
@@ -535,10 +555,10 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
         if let Some(sender) = senders.remove(&seq) {
             let response = match change_type {
-                ConfChangeType::AddNode => RaftResponse::JoinSuccess {
+                ConfChangeType::AddNode => Response::JoinSuccess {
                     peer_addrs: self.peer_addrs(),
                 },
-                ConfChangeType::RemoveNode => RaftResponse::Ok,
+                ConfChangeType::RemoveNode => Response::Ok,
                 _ => unimplemented!(),
             };
             if sender.send(response).is_err() {
@@ -551,12 +571,12 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     async fn handle_normal(
         &mut self,
         entry: &Entry,
-        senders: &mut HashMap<u64, oneshot::Sender<RaftResponse>>,
+        senders: &mut HashMap<u64, oneshot::Sender<Response>>,
     ) -> Result<()> {
         let seq: u64 = deserialize(entry.get_context())?;
         let data = self.store.apply(entry.get_data()).await?;
         if let Some(sender) = senders.remove(&seq) {
-            sender.send(RaftResponse::Response { data }).unwrap();
+            sender.send(Response::Response { data }).unwrap();
         }
 
         if Instant::now() > self.last_snap_time + Duration::from_secs(15) {
@@ -571,19 +591,33 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         Ok(())
     }
 
-    fn propose_remove_node(&mut self, node_id: &str) -> Result<()> {
+    async fn propose_remove_node(&mut self, node_id: &str) -> Result<()> {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         let mut change = ConfChange::default();
         change.set_node_id(node_id.to_string());
         change.set_change_type(ConfChangeType::RemoveNode);
         change.set_context(serialize(&self.id())?);
-        match self.propose_conf_change(serialize(&seq).unwrap(), change) {
-            Ok(_) => Ok(()),
+        let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
+            Ok(_) => {
+                let (tx, _) = oneshot::channel();
+                let change = RaftChange::RemoveNode {
+                    node_id: node_id.to_string(),
+                };
+                let _ = self
+                    .snd
+                    .send(Message::ServiceProposalRequest {
+                        request: serialize(&change).unwrap(),
+                        reply_chan: tx,
+                    })
+                    .await;
+                Ok(())
+            }
             Err(_) => {
                 error!("failed to propose removing node {}", node_id);
                 Ok(())
             }
-        }
+        };
+        ret
     }
 }
 

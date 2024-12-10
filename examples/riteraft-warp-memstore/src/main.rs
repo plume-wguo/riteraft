@@ -118,7 +118,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
+    let (tx, rx) = tokio::sync::mpsc::channel(100);
+    let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
     // let raft_handle = match options.peer_addr {
     let node = match options.peer_addr {

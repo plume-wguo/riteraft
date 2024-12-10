@@ -11,7 +11,7 @@ use bincode::{deserialize, serialize};
 use riteraft::{Mailbox, Raft, Result, Store};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{mpsc, Arc, RwLock};
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -111,7 +111,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let raft = Raft::new(&options.raft_addr, store.clone(), logger.clone());
+    let (tx, rx) = tokio::sync::mpsc::channel(100);
+    let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
     let node = match options.peer_addr {
         Some(addr) => {

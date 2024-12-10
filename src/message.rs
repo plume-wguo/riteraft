@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use raft::{
     eraftpb::{ConfChange, Message as RaftMessage},
     StateRole,
@@ -7,18 +5,14 @@ use raft::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot::Sender;
 
+/// copy of raft AddNode and RemoveNode ConfChange, because original struct is not de/serializable
 #[derive(Serialize, Deserialize, Debug)]
-pub enum RaftResponse {
-    NoLeader { peer_addrs: Vec<String> },
-    WrongLeader { leader_addr: String },
-    JoinSuccess { peer_addrs: Vec<String> },
-    Error,
-    Response { data: Vec<u8> },
-    Ok,
-    RaftState { role: RaftRole },
+pub enum RaftChange {
+    AddNode { node_id: String },
+    RemoveNode { node_id: String },
 }
 
-/// The role of the node.
+/// copy of raft role. because original struct is not de/serializable
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Default, Serialize, Deserialize)]
 pub enum RaftRole {
     /// The node is a follower of the leader.
@@ -49,21 +43,36 @@ impl RaftRole {
     }
 }
 
+#[derive(Serialize, Deserialize, Debug)]
+pub enum Response {
+    Error,
+    JoinSuccess { peer_addrs: Vec<String> },
+    NoLeader { peer_addrs: Vec<String> },
+    Ok,
+    RaftState { role: RaftRole, leader_id: String },
+    Response { data: Vec<u8> },
+    WrongLeader { leader_addr: String },
+}
+
 #[allow(dead_code)]
 pub enum Message {
     Leave {
-        reply_chan: Sender<RaftResponse>,
+        reply_chan: Sender<Response>,
+    },
+    ServiceProposalRequest {
+        request: Vec<u8>,
+        reply_chan: Sender<Response>,
     },
     RaftState {
-        reply_chan: Sender<RaftResponse>,
+        reply_chan: Sender<Response>,
     },
     Propose {
         proposal: Vec<u8>,
-        reply_chan: Sender<RaftResponse>,
+        reply_chan: Sender<Response>,
     },
     ConfigChange {
         change: ConfChange,
-        reply_chan: Sender<RaftResponse>,
+        reply_chan: Sender<Response>,
     },
     ReportUnreachable {
         node_id: String,

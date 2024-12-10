@@ -1,28 +1,38 @@
 use std::net::{SocketAddr, ToSocketAddrs};
 use std::time::Duration;
 
-use crate::message::{Message, RaftResponse};
+use crate::message::{Message, Response};
 use crate::raft_service::raft_service_server::{RaftService, RaftServiceServer};
-use crate::raft_service::{RaftServiceResponse, ResultCode as RaftServiceResultCode};
+use crate::raft_service::{Proposal, RaftServiceResponse, ResultCode as RaftServiceResultCode};
+use crate::ServiceProposalRequest;
 
 use bincode::serialize;
-use log::{error, info};
+use log::{debug, error, info};
 use raft::eraftpb::Message as RaftMessage;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tonic::transport::Server;
-use tonic::{Request, Response, Status};
+use tonic::{Request, Response as GrpcResponse, Status};
 
 pub struct RaftServer {
-    snd: mpsc::Sender<Message>,
+    raft_node_tx: mpsc::Sender<Message>,
+    proposal_service_tx: mpsc::Sender<ServiceProposalRequest>,
     addr: SocketAddr,
 }
 
 impl RaftServer {
-    pub fn new<A: ToSocketAddrs>(snd: mpsc::Sender<Message>, addr: A) -> Self {
+    pub fn new<A: ToSocketAddrs>(
+        raft_node_tx: mpsc::Sender<Message>,
+        leader_service_tx: mpsc::Sender<ServiceProposalRequest>,
+        addr: A,
+    ) -> Self {
         let addr = addr.to_socket_addrs().unwrap().next().unwrap();
-        RaftServer { snd, addr }
+        RaftServer {
+            raft_node_tx,
+            proposal_service_tx: leader_service_tx,
+            addr,
+        }
     }
 
     pub async fn run(self) {
@@ -40,13 +50,14 @@ impl RaftServer {
 
 #[tonic::async_trait]
 impl RaftService for RaftServer {
+    /// use it to send AddNode or RemoveNode ConfigChange to leader, if node is not leader, return WrongLeader response with leader addr
     async fn change_config(
         &self,
         req: Request<raft::eraftpb::ConfChange>,
-    ) -> Result<Response<RaftServiceResponse>, Status> {
+    ) -> Result<GrpcResponse<RaftServiceResponse>, Status> {
         info!("received change config requests from: {:?}", &req);
         let change = req.into_inner();
-        let sender = self.snd.clone();
+        let raft_node_tx = self.raft_node_tx.clone();
 
         let (tx, rx) = oneshot::channel();
         let message = Message::ConfigChange {
@@ -54,7 +65,7 @@ impl RaftService for RaftServer {
             reply_chan: tx,
         };
 
-        match sender.send(message).await {
+        match raft_node_tx.send(message).await {
             Ok(_) => (),
             Err(_) => error!("send error"),
         }
@@ -66,19 +77,19 @@ impl RaftService for RaftServer {
         info!("change config response = {:?}", response);
         match response {
             Ok(Ok(res)) => match res {
-                RaftResponse::WrongLeader { leader_addr } => {
-                    return Ok(Response::new(RaftServiceResponse {
+                Response::WrongLeader { leader_addr } => {
+                    return Ok(GrpcResponse::new(RaftServiceResponse {
                         code: RaftServiceResultCode::WrongLeader as i32,
                         data: serialize(&(leader_addr)).unwrap(),
                     }));
                 }
-                RaftResponse::JoinSuccess { peer_addrs } => {
-                    return Ok(Response::new(RaftServiceResponse {
+                Response::JoinSuccess { peer_addrs } => {
+                    return Ok(GrpcResponse::new(RaftServiceResponse {
                         code: RaftServiceResultCode::Ok as i32,
                         data: serialize(&(peer_addrs)).unwrap(),
                     }));
                 }
-                RaftResponse::Ok => (),
+                Response::Ok => (),
                 r => {
                     default_reply.code = RaftServiceResultCode::Error as i32;
                     default_reply.data = serialize(&r).unwrap();
@@ -87,32 +98,48 @@ impl RaftService for RaftServer {
             },
             Ok(Err(_)) => {
                 default_reply.code = RaftServiceResultCode::Error as i32;
-                default_reply.data = serialize(&RaftResponse::Error).unwrap();
+                default_reply.data = serialize(&Response::Error).unwrap();
                 error!("timeout waiting for response");
             }
             Err(_e) => {
                 default_reply.code = RaftServiceResultCode::Error as i32;
-                default_reply.data = serialize(&RaftResponse::Error).unwrap();
+                default_reply.data = serialize(&Response::Error).unwrap();
                 error!("timeout waiting for response");
             }
         }
 
-        Ok(Response::new(default_reply))
+        Ok(GrpcResponse::new(default_reply))
     }
 
-    async fn send_message(
+    /// send a raft internal messages between nodes, e.g. heartbeat, election campaign, proposal.
+    async fn send_raft_message(
         &self,
         request: Request<RaftMessage>,
-    ) -> Result<Response<RaftServiceResponse>, Status> {
+    ) -> Result<GrpcResponse<RaftServiceResponse>, Status> {
         let message = request.into_inner();
         // again this ugly shit to serialize the message
         // debug!("send message {:?}", message);
-        let sender = self.snd.clone();
-        match sender.send(Message::Raft(Box::new(message))).await {
+        let raft_node_tx = self.raft_node_tx.clone();
+        match raft_node_tx.send(Message::Raft(Box::new(message))).await {
             Ok(_) => (),
             Err(_) => error!("send error"),
         }
 
-        Ok(Response::new(RaftServiceResponse::default()))
+        Ok(GrpcResponse::new(RaftServiceResponse::default()))
+    }
+
+    /// send a request to a internal service registered to let service determine and send some proposal.
+    /// only leader node will make proposal, service should check if it's leader. internal service should use raft MailBox to send proposals
+    async fn request_service_proposal(
+        &self,
+        request: Request<Proposal>,
+    ) -> Result<GrpcResponse<RaftServiceResponse>, Status> {
+        let _ = self
+            .proposal_service_tx
+            .send(ServiceProposalRequest {
+                inner: request.into_inner().inner,
+            })
+            .await;
+        Ok(GrpcResponse::new(RaftServiceResponse::default()))
     }
 }

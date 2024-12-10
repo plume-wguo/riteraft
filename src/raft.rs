@@ -1,11 +1,9 @@
 use crate::error::{Error, Result};
-use crate::message::{Message, RaftResponse, RaftRole};
+use crate::message::{Message, RaftRole, Response};
 use crate::raft_node::RaftNode;
 use crate::raft_server::RaftServer;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::ResultCode;
-use std::sync::Arc;
-use tokio::task::JoinHandle;
 
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
@@ -16,6 +14,11 @@ use tokio::time::timeout;
 use tonic::Request;
 
 use std::time::Duration;
+
+#[derive(Clone)]
+pub struct ServiceProposalRequest {
+    pub inner: Vec<u8>,
+}
 
 #[async_trait]
 pub trait Store {
@@ -41,8 +44,8 @@ impl Mailbox {
         // TODO make timeout duration a variable
         match sender.send(proposal).await {
             Ok(_) => match timeout(Duration::from_secs(2), rx).await {
-                Ok(Ok(RaftResponse::Response { data })) => Ok(data),
-                Ok(Ok(RaftResponse::WrongLeader { leader_addr })) => {
+                Ok(Ok(Response::Response { data })) => Ok(data),
+                Ok(Ok(Response::WrongLeader { leader_addr })) => {
                     Err(Error::WrongLeader(leader_addr))
                 }
                 _ => Err(Error::Unknown),
@@ -53,22 +56,40 @@ impl Mailbox {
 
     pub async fn leave(&self) -> Result<()> {
         let sender = self.0.clone();
-        let (chan, rx) = oneshot::channel();
-        match sender.send(Message::Leave { reply_chan: chan }).await {
+        let (tx, rx) = oneshot::channel();
+        match sender.send(Message::Leave { reply_chan: tx }).await {
             Ok(_) => match rx.await {
-                Ok(RaftResponse::Ok {}) => Ok(()),
+                Ok(Response::Ok {}) => Ok(()),
                 _ => Err(Error::Unknown),
             },
             _ => Err(Error::Unknown),
         }
     }
 
-    pub async fn role(&self) -> Result<RaftRole> {
+    pub async fn role(&self) -> Result<(RaftRole, String)> {
         let sender = self.0.clone();
-        let (chan, rx) = oneshot::channel();
-        match sender.send(Message::RaftState { reply_chan: chan }).await {
+        let (tx, rx) = oneshot::channel();
+        match sender.send(Message::RaftState { reply_chan: tx }).await {
             Ok(_) => match rx.await {
-                Ok(RaftResponse::RaftState { role }) => Ok(role),
+                Ok(Response::RaftState { role, leader_id }) => Ok((role, leader_id)),
+                _ => Err(Error::Unknown),
+            },
+            _ => Err(Error::Unknown),
+        }
+    }
+
+    pub async fn request_service_proposal(&self, request: Vec<u8>) -> Result<()> {
+        let sender = self.0.clone();
+        let (tx, rx) = oneshot::channel();
+        match sender
+            .send(Message::ServiceProposalRequest {
+                request,
+                reply_chan: tx,
+            })
+            .await
+        {
+            Ok(_) => match rx.await {
+                Ok(_) => Ok(()),
                 _ => Err(Error::Unknown),
             },
             _ => Err(Error::Unknown),
@@ -78,20 +99,27 @@ impl Mailbox {
 
 pub struct Raft<S: Store + 'static> {
     store: S,
-    tx: mpsc::Sender<Message>,
-    rx: mpsc::Receiver<Message>,
+    proposal_service_tx: mpsc::Sender<ServiceProposalRequest>,
+    raft_node_tx: mpsc::Sender<Message>,
+    raft_node_rx: mpsc::Receiver<Message>,
     addr: String,
     logger: slog::Logger,
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// creates a new node with the given address and store.
-    pub fn new(addr: &str, store: S, logger: slog::Logger) -> Self {
+    pub fn new(
+        addr: &str,
+        store: S,
+        proposal_service_tx: mpsc::Sender<ServiceProposalRequest>,
+        logger: slog::Logger,
+    ) -> Self {
         let (tx, rx) = mpsc::channel(100);
         Self {
             store,
-            tx: tx,
-            rx: rx,
+            proposal_service_tx,
+            raft_node_tx: tx,
+            raft_node_rx: rx,
             addr: addr.to_string(),
             logger,
         }
@@ -99,7 +127,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     /// gets the node's `Mailbox`.
     pub fn mailbox(&self) -> Mailbox {
-        Mailbox(self.tx.clone())
+        Mailbox(self.raft_node_tx.clone())
     }
 
     /// Create a new leader for the cluster. There has to be exactly one node in the
@@ -109,12 +137,12 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let addr = self.addr.clone();
         let node = RaftNode::new_leader(
             &self.addr,
-            self.rx,
-            self.tx.clone(),
+            self.raft_node_rx,
+            self.raft_node_tx.clone(),
             self.store,
             &self.logger,
         );
-        let server = RaftServer::new(self.tx, addr);
+        let server = RaftServer::new(self.raft_node_tx, self.proposal_service_tx, addr);
         let _server_handle = tokio::spawn(server.run());
         // let node_handle = tokio::spawn(node.run());
         // Ok(node_handle)
@@ -127,12 +155,16 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     // pub async fn join(self, peers: Vec<&str>) -> Result<JoinHandle<Result<()>>> {
     pub async fn join(self, peers: Vec<&str>) -> Result<RaftNode<S>> {
         info!("attemping to join cluster using peers: {:?}", &peers);
-        let server = RaftServer::new(self.tx.clone(), self.addr.clone());
+        let server = RaftServer::new(
+            self.raft_node_tx.clone(),
+            self.proposal_service_tx,
+            self.addr.clone(),
+        );
         let _server_handle = tokio::spawn(server.run());
         let node = RaftNode::new_follower(
             &self.addr,
-            self.rx,
-            self.tx.clone(),
+            self.raft_node_rx,
+            self.raft_node_tx.clone(),
             self.store,
             &self.logger,
         )
