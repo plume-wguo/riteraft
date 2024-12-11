@@ -121,18 +121,21 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    // let raft_handle = match options.peer_addr {
     let node = match options.peer_addr {
         Some(addr) => {
             info!("running in follower mode");
-            raft.join(vec![&addr]).await?
+            raft.join(vec![&addr]).await
         }
         None => {
             info!("running in leader mode");
-            raft.lead().await?
+            raft.lead().await
         }
     };
-    let raft_handle = tokio::spawn(node.run());
+    let raft_handle = match node {
+        Err(_) => panic!("join failed"),
+        Ok(node) => node,
+        // Ok(node) => tokio::spawn(node.run()),
+    };
 
     let put_kv = warp::get()
         .and(warp::path!("put" / String / String))

@@ -276,7 +276,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     reply_chan,
                     mut change,
                 })) => {
-                    debug!(
+                    info!(
                         "as {:?}, received config change: {:?}",
                         self.inner.raft.state, change,
                     );
@@ -289,19 +289,18 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                         let raft_response = Response::NoLeader {
                             peer_addrs: self.peer_addrs(),
                         };
-                        // TODO handle error here
+                        let _ = self.inner.campaign();
                         let _ = reply_chan.send(raft_response);
-                        // TODO: retry strategy in case of failure
-                        info!("no leader, try to become condidate");
-                        self.inner.raft.become_candidate();
-                        self.inner.apply_conf_change(&change)?;
                     } else if !self.is_leader() {
                         self.send_wrong_leader(reply_chan);
                     } else {
-                        // leader assign new id to peer
-                        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-                        client_send.insert(seq, reply_chan);
-                        self.propose_conf_change(serialize(&seq).unwrap(), change)?;
+                        if change.change_type == ConfChangeType::RemoveNode as i32 {
+                            self.propose_remove_node(change.get_node_id()).await?;
+                            let _ = reply_chan.send(Response::Ok);
+                        } else {
+                            self.propose_add_node(change.get_node_id()).await?;
+                            let _ = reply_chan.send(Response::Ok);
+                        }
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
@@ -614,6 +613,35 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             }
             Err(_) => {
                 error!("failed to propose removing node {}", node_id);
+                Ok(())
+            }
+        };
+        ret
+    }
+
+    async fn propose_add_node(&mut self, node_id: &str) -> Result<()> {
+        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+        let mut change = ConfChange::default();
+        change.set_node_id(node_id.to_string());
+        change.set_change_type(ConfChangeType::AddNode);
+        change.set_context(serialize(&self.id())?);
+        let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
+            Ok(_) => {
+                let (tx, _) = oneshot::channel();
+                let change = RaftChange::AddNode {
+                    node_id: node_id.to_string(),
+                };
+                let _ = self
+                    .snd
+                    .send(Message::ServiceProposalRequest {
+                        request: serialize(&change).unwrap(),
+                        reply_chan: tx,
+                    })
+                    .await;
+                Ok(())
+            }
+            Err(_) => {
+                error!("failed to propose adding node {}", node_id);
                 Ok(())
             }
         };

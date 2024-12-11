@@ -114,7 +114,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(100);
     let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
-    let node = match options.peer_addr {
+    let raft_handle = match options.peer_addr {
         Some(addr) => {
             log::info!("running in follower mode");
             raft.join(vec![&addr]).await?
@@ -124,7 +124,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             raft.lead().await?
         }
     };
-    let raft_handle = tokio::spawn(node.run());
+    // let raft_handle = tokio::spawn(node.run());
 
     if let Some(addr) = options.web_server {
         let _server = tokio::spawn(

@@ -4,12 +4,12 @@ use crate::raft_node::RaftNode;
 use crate::raft_server::RaftServer;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::ResultCode;
-
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
-use log::{error, info};
+use log::{debug, error, info};
 use raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use tonic::Request;
 
@@ -132,8 +132,8 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
 
     /// Create a new leader for the cluster. There has to be exactly one node in the
     /// cluster that is initialised that way
-    // pub async fn lead(self) -> Result<JoinHandle<Result<()>>> {
-    pub async fn lead(self) -> Result<RaftNode<S>> {
+    pub async fn lead(self) -> Result<JoinHandle<Result<()>>> {
+        // pub async fn lead(self) -> Result<RaftNode<S>> {
         let addr = self.addr.clone();
         let node = RaftNode::new_leader(
             &self.addr,
@@ -144,17 +144,20 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         );
         let server = RaftServer::new(self.raft_node_tx, self.proposal_service_tx, addr);
         let _server_handle = tokio::spawn(server.run());
-        // let node_handle = tokio::spawn(node.run());
-        // Ok(node_handle)
-        Ok(node)
+        let node_handle = tokio::spawn(node.run());
+        Ok(node_handle)
+        // Ok(node)
     }
 
     /// Try using node addr as an id to join cluster at `peers`, or finding it if
     /// `peers` is not the current leader of the cluster, it will use returned new addr
     /// join will try to remove this node and add again
-    // pub async fn join(self, peers: Vec<&str>) -> Result<JoinHandle<Result<()>>> {
-    pub async fn join(self, peers: Vec<&str>) -> Result<RaftNode<S>> {
-        info!("attemping to join cluster using peers: {:?}", &peers);
+    pub async fn join(self, peers: Vec<&str>) -> Result<JoinHandle<Result<()>>> {
+        // pub async fn join(self, peers: Vec<&str>) -> Result<RaftNode<S>> {
+        info!(
+            "{} attemping to join cluster with peers: {:?}",
+            &self.addr, &peers
+        );
         let server = RaftServer::new(
             self.raft_node_tx.clone(),
             self.proposal_service_tx,
@@ -169,48 +172,57 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             &self.logger,
         )
         .unwrap();
+        let handle = tokio::spawn(node.run());
         let mut change = ConfChange::default();
         change.set_node_id(self.addr.clone());
         // try to remove node firstly
         change.set_change_type(ConfChangeType::RemoveNode);
         change.set_context(serialize(&self.addr)?);
-        for addr in peers {
+        // loop {
+        for addr in peers.clone() {
             let mut leader_addr = addr.to_string();
-            if let Ok(mut client) =
-                RaftServiceClient::connect(format!("http://{}", &leader_addr)).await
-            {
-                loop {
-                    let response = client
-                        .change_config(Request::new(change.clone()))
-                        .await?
-                        .into_inner();
-                    match response.code() {
-                        ResultCode::WrongLeader => {
-                            let addr: String = deserialize(&response.data)?;
-                            leader_addr = addr;
-                            info!("rejoin with new peer at {}", leader_addr);
-                            continue;
-                        }
-                        ResultCode::Ok => {
-                            if change.change_type == ConfChangeType::AddNode as i32 {
-                                info!("join successfully with leader at {}", leader_addr);
-                                // let node_handle = tokio::spawn(node.run());
-                                // return Ok(node_handle);
-                                return Ok(node);
-                            } else if change.change_type == ConfChangeType::RemoveNode as i32 {
-                                // removed node, add node again
-                                change.set_change_type(ConfChangeType::AddNode);
+            loop {
+                match RaftServiceClient::connect(format!("http://{}", &leader_addr)).await {
+                    Ok(mut client) => {
+                        let response = client
+                            .change_config(Request::new(change.clone()))
+                            .await?
+                            .into_inner();
+                        info!("received change_config api response: {}", &response.code);
+                        match response.code() {
+                            ResultCode::WrongLeader => {
+                                let addr: String = deserialize(&response.data)?;
+                                leader_addr = addr;
+                                info!("rejoin with new leader at {}", leader_addr);
                                 continue;
                             }
+                            ResultCode::NoLeader => {
+                                // let peers: Vec<String> = deserialize(&response.data)?;
+                                info!("no leader, continue ask peers after 10 seconds",);
+                                tokio::time::sleep(Duration::from_secs(10)).await;
+                                continue;
+                            }
+                            ResultCode::Ok => {
+                                if change.change_type == ConfChangeType::AddNode as i32 {
+                                    info!("join successfully with leader at {}", leader_addr);
+                                    // return Ok(node);
+                                    return Ok(handle);
+                                } else if change.change_type == ConfChangeType::RemoveNode as i32 {
+                                    // removed node, add node again
+                                    change.set_change_type(ConfChangeType::AddNode);
+                                    continue;
+                                }
+                            }
+                            _ => break,
                         }
-                        _ => break,
+                    }
+                    Err(_) => {
+                        error!("failed to connect to peer {}, try next one", &leader_addr);
                     }
                 }
-            } else {
-                // try next peer
-                continue;
             }
         }
+        // }
 
         error!("failed to join cluster with any peers");
         Err(Error::JoinError)

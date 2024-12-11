@@ -13,6 +13,7 @@ enum ResultCode {
   Ok            = 0;
   Error         = 1;
   WrongLeader   = 2;
+  NoLeader      = 3;
 }
 
 message Proposal {

@@ -67,7 +67,7 @@ impl RaftService for RaftServer {
 
         match raft_node_tx.send(message).await {
             Ok(_) => (),
-            Err(_) => error!("send error"),
+            Err(_) => error!("failed to send config change to local node via tx channel"),
         }
 
         let mut default_reply = RaftServiceResponse::default();
@@ -81,6 +81,12 @@ impl RaftService for RaftServer {
                     return Ok(GrpcResponse::new(RaftServiceResponse {
                         code: RaftServiceResultCode::WrongLeader as i32,
                         data: serialize(&(leader_addr)).unwrap(),
+                    }));
+                }
+                Response::NoLeader { peer_addrs } => {
+                    return Ok(GrpcResponse::new(RaftServiceResponse {
+                        code: RaftServiceResultCode::NoLeader as i32,
+                        data: serialize(&(peer_addrs)).unwrap(),
                     }));
                 }
                 Response::JoinSuccess { peer_addrs } => {
@@ -122,7 +128,7 @@ impl RaftService for RaftServer {
         let raft_node_tx = self.raft_node_tx.clone();
         match raft_node_tx.send(Message::Raft(Box::new(message))).await {
             Ok(_) => (),
-            Err(_) => error!("send error"),
+            Err(_) => error!("failed to send raft message to local node via tx channel"),
         }
 
         Ok(GrpcResponse::new(RaftServiceResponse::default()))
