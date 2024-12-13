@@ -605,6 +605,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         change.set_context(serialize(&self.id())?);
         let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
             Ok(_) => {
+                info!("request service proposal for removing node {}", node_id);
                 let change = RaftChange::RemoveNode {
                     node_id: node_id.to_string(),
                 };
@@ -633,6 +634,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         change.set_context(serialize(&self.id())?);
         let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
             Ok(_) => {
+                info!("request service proposal for adding node {}", node_id);
                 let change = RaftChange::AddNode {
                     node_id: node_id.to_string(),
                 };

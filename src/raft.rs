@@ -1,6 +1,6 @@
 use crate::error::{Error, Result};
 use crate::message::{Message, RaftRole, Response};
-use crate::raft_node::RaftNode;
+use crate::raft_node::{Peer, RaftNode};
 use crate::raft_server::RaftServer;
 use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::ResultCode;
@@ -171,10 +171,10 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         // try to remove node firstly
         change.set_change_type(ConfChangeType::RemoveNode);
         change.set_context(serialize(&self.addr)?);
-        // loop {
         for addr in peers.clone() {
             let mut leader_addr = addr.to_string();
             loop {
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 match RaftServiceClient::connect(format!("http://{}", &leader_addr)).await {
                     Ok(mut client) => {
                         let response = client
@@ -206,16 +206,19 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                                     continue;
                                 }
                             }
-                            _ => break,
+                            _ => {
+                                error!("failed to join using peer {}, try next one", &leader_addr);
+                                break;
+                            }
                         }
                     }
                     Err(_) => {
                         error!("failed to connect to peer {}, try next one", &leader_addr);
+                        break;
                     }
                 }
             }
         }
-        // }
 
         error!("failed to join cluster with any peers");
         Err(Error::JoinError)
