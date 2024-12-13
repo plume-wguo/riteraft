@@ -6,6 +6,7 @@ extern crate slog_term;
 use async_trait::async_trait;
 use bincode::{deserialize, serialize};
 use log::info;
+use riteraft::RaftChange;
 use riteraft::{Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::Drain;
@@ -118,7 +119,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let options = Options::from_args();
     let store = HashStore::new();
 
-    let (tx, rx) = tokio::sync::mpsc::channel(100);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(100);
     let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
     let node = match options.peer_addr {
@@ -162,6 +163,20 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
                 .await;
         });
     }
+
+    let manager_ext_handle = tokio::task::spawn(async move {
+        while let Some(request) = rx.recv().await {
+            let command = deserialize(&request.inner.as_slice()).unwrap();
+            match command {
+                RaftChange::AddNode { node_id: node_addr } => {
+                    info!("received add node service proposal callback");
+                }
+                RaftChange::RemoveNode { node_id: node_addr } => {
+                    info!("received remove node service proposal callback");
+                }
+            }
+        }
+    });
 
     let result = tokio::try_join!(raft_handle)?;
     result.0?;

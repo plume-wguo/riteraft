@@ -6,7 +6,7 @@ use crate::raft_service::raft_service_client::RaftServiceClient;
 use crate::raft_service::Proposal;
 use crate::storage::{LogStore, MemStorage};
 use bincode::{deserialize, serialize};
-use log::*;
+use log::{debug, error, info, warn};
 use prost::Message as PMessage;
 use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as RaftMessage};
 use raft::{prelude::*, raw_node::RawNode, Config};
@@ -336,26 +336,31 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                         }
                     }
                 }
-                Ok(Some(Message::ServiceProposalRequest {
-                    request,
-                    reply_chan,
-                })) => {
+                Ok(Some(Message::ServiceProposalRequest { request })) => {
                     debug!(
                         "as {:?}, received request service proposal message",
                         &self.raft.state,
                     );
-                    // maybe just send message to itself if it's leader
                     let leader_addr = self.leader().to_string();
-                    if let Some(p) = self.peer_mut(&leader_addr) {
-                        let _ = p
-                            .client
-                            .request_service_proposal(Request::new(Proposal { inner: request }))
-                            .await;
-                        let _ = reply_chan.send(Response::Ok);
+                    if leader_addr != "" {
+                        if let Some(p) = self.peer_mut(&leader_addr) {
+                            let _ = p
+                                .client
+                                .request_service_proposal(Request::new(Proposal { inner: request }))
+                                .await;
+                        } else {
+                            // should send message to itself if it's leader
+                            if let Ok(mut peer) = Peer::new(&leader_addr).await {
+                                let _ = peer
+                                    .client
+                                    .request_service_proposal(Request::new(Proposal {
+                                        inner: request,
+                                    }))
+                                    .await;
+                            }
+                        }
                     } else {
-                        let _ = reply_chan.send(Response::NoLeader {
-                            peer_addrs: self.peer_addrs(),
-                        });
+                        info!("leader is unknown, can not send service proposal message");
                     }
                 }
                 Ok(Some(Message::RaftState { reply_chan })) => {
@@ -384,7 +389,10 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::ReportUnreachable { node_id })) => {
-                    info!("node {} is not reachable", &node_id);
+                    info!(
+                        "as {:?}, found node {} is not reachable",
+                        &self.raft.state, &node_id
+                    );
                     self.report_unreachable(node_id.clone());
                     if let Some(peer) = self.peer_mut(&node_id) {
                         let cnt = peer.inc_get_unreachble_cnt();
@@ -473,7 +481,6 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
     async fn send_messages(&mut self, msgs: Vec<RaftMessage>) {
         for msg in msgs {
-            // debug!("send raft message {:?}", msg);
             let to_addr = msg.get_to();
             let client = match self.peer_mut(to_addr) {
                 Some(ref peer) => peer.client.clone(),
@@ -598,15 +605,14 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         change.set_context(serialize(&self.id())?);
         let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
             Ok(_) => {
-                let (tx, _) = oneshot::channel();
                 let change = RaftChange::RemoveNode {
                     node_id: node_id.to_string(),
                 };
-                let _ = self
+                let r = self
                     .snd
+                    .clone()
                     .send(Message::ServiceProposalRequest {
                         request: serialize(&change).unwrap(),
-                        reply_chan: tx,
                     })
                     .await;
                 Ok(())
@@ -627,15 +633,14 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         change.set_context(serialize(&self.id())?);
         let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
             Ok(_) => {
-                let (tx, _) = oneshot::channel();
                 let change = RaftChange::AddNode {
                     node_id: node_id.to_string(),
                 };
-                let _ = self
+                let r = self
                     .snd
+                    .clone()
                     .send(Message::ServiceProposalRequest {
                         request: serialize(&change).unwrap(),
-                        reply_chan: tx,
                     })
                     .await;
                 Ok(())

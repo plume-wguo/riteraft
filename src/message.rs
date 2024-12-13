@@ -61,7 +61,6 @@ pub enum Message {
     },
     ServiceProposalRequest {
         request: Vec<u8>,
-        reply_chan: Sender<Response>,
     },
     RaftState {
         reply_chan: Sender<Response>,

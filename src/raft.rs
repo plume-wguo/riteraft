@@ -80,18 +80,11 @@ impl Mailbox {
 
     pub async fn request_service_proposal(&self, request: Vec<u8>) -> Result<()> {
         let sender = self.0.clone();
-        let (tx, rx) = oneshot::channel();
         match sender
-            .send(Message::ServiceProposalRequest {
-                request,
-                reply_chan: tx,
-            })
+            .send(Message::ServiceProposalRequest { request })
             .await
         {
-            Ok(_) => match rx.await {
-                Ok(_) => Ok(()),
-                _ => Err(Error::Unknown),
-            },
+            Ok(_) => Ok(()),
             _ => Err(Error::Unknown),
         }
     }
