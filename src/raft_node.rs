@@ -12,12 +12,14 @@ use raft::eraftpb::{ConfChange, ConfChangeType, Entry, EntryType, Message as Raf
 use raft::{prelude::*, raw_node::RawNode, Config};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
+use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tonic::transport::channel::Channel;
+use tonic::transport::Endpoint;
 use tonic::Request;
 
 struct MessageSender {
@@ -35,25 +37,24 @@ impl MessageSender {
     async fn send(mut self) {
         let mut current_retry = 0usize;
         loop {
-            debug!("send raft message to {:?}", self.message.clone());
             let message_request = Request::new(self.message.clone());
             match self.client.send_raft_message(message_request).await {
                 Ok(e) => {
-                    error!("send raft message to client {} get {:?}", self.client_id, e);
+                    debug!(
+                        "send raft message {:?} get {:?}",
+                        self.message,
+                        e.into_inner()
+                    );
                     return;
                 }
                 Err(e) => {
                     if current_retry < self.max_retries {
                         current_retry += 1;
                         tokio::time::sleep(self.timeout).await;
-                        error!(
-                            "failed to send raft message to {} after {} retries: {}",
-                            self.client_id, self.max_retries, e
-                        );
                     } else {
                         error!(
                             "failed to send raft message to {} after {} retries: {}",
-                            self.client_id, self.max_retries, e
+                            self.client_id, current_retry, e
                         );
                         let _ = self
                             .reply_tx
@@ -93,11 +94,14 @@ impl Peer {
     pub async fn new(addr: &str) -> Result<Peer> {
         // TODO: clean up this mess
         debug!("connecting to node at {}...", addr);
-        let client = RaftServiceClient::connect(format!("http://{}", addr)).await?;
-        let addr = addr.to_string();
+        let ep = Endpoint::from_str(&format!("http://{}", addr))
+            .unwrap()
+            .timeout(Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5));
+        let client = RaftServiceClient::connect(ep).await?;
         debug!("connected to node at {}.", addr);
         Ok(Peer {
-            addr,
+            addr: addr.to_string(),
             client,
             unreachable_cnt: 0,
         })
@@ -402,7 +406,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     self.report_unreachable(node_id.clone());
                     if let Some(peer) = self.peer_mut(&node_id) {
                         let cnt = peer.inc_get_unreachble_cnt();
-                        if cnt > 20 {
+                        if cnt > 10 {
                             self.propose_remove_node(&node_id).await?;
                         }
                     }
@@ -501,9 +505,9 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                 reply_tx: self.snd.clone(),
                 message: msg,
                 timeout: Duration::from_millis(100),
-                max_retries: 5,
+                max_retries: 2,
             };
-            tokio::spawn(message_sender.send());
+            let _ = tokio::task::spawn(message_sender.send()).await;
         }
     }
 

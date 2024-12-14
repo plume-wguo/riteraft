@@ -11,8 +11,10 @@ use raft::eraftpb::{ConfChange, ConfChangeType};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use tonic::transport::Endpoint;
 use tonic::Request;
 
+use std::str::FromStr;
 use std::time::Duration;
 
 #[derive(Clone)]
@@ -174,8 +176,12 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         for addr in peers.clone() {
             let mut leader_addr = addr.to_string();
             loop {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                match RaftServiceClient::connect(format!("http://{}", &leader_addr)).await {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let ep = Endpoint::from_str(&format!("http://{}", leader_addr))
+                    .unwrap()
+                    .timeout(Duration::from_secs(2))
+                    .connect_timeout(Duration::from_secs(5));
+                match RaftServiceClient::connect(ep).await {
                     Ok(mut client) => {
                         let response = client
                             .change_config(Request::new(change.clone()))
@@ -190,9 +196,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                                 continue;
                             }
                             ResultCode::NoLeader => {
-                                // let peers: Vec<String> = deserialize(&response.data)?;
-                                info!("no leader, continue ask peers after 10 seconds",);
-                                tokio::time::sleep(Duration::from_secs(10)).await;
+                                info!("no leader, continue after 5 seconds",);
                                 continue;
                             }
                             ResultCode::Ok => {
