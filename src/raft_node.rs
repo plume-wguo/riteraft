@@ -35,19 +35,25 @@ impl MessageSender {
     async fn send(mut self) {
         let mut current_retry = 0usize;
         loop {
+            debug!("send raft message to {:?}", self.message.clone());
             let message_request = Request::new(self.message.clone());
             match self.client.send_raft_message(message_request).await {
-                Ok(_) => {
+                Ok(e) => {
+                    error!("send raft message to client {} get {:?}", self.client_id, e);
                     return;
                 }
                 Err(e) => {
                     if current_retry < self.max_retries {
                         current_retry += 1;
                         tokio::time::sleep(self.timeout).await;
+                        error!(
+                            "failed to send raft message to {} after {} retries: {}",
+                            self.client_id, self.max_retries, e
+                        );
                     } else {
-                        debug!(
-                            "error sending message after {} retries: {}",
-                            self.max_retries, e
+                        error!(
+                            "failed to send raft message to {} after {} retries: {}",
+                            self.client_id, self.max_retries, e
                         );
                         let _ = self
                             .reply_tx
