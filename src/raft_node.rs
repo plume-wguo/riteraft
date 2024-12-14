@@ -407,7 +407,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     if let Some(peer) = self.peer_mut(&node_id) {
                         let cnt = peer.inc_get_unreachble_cnt();
                         if cnt > 10 {
-                            self.propose_remove_node(&node_id).await?;
+                            let _ = self.propose_remove_node(&node_id).await;
                         }
                     }
                 }
@@ -608,32 +608,28 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     }
 
     async fn propose_remove_node(&mut self, node_id: &str) -> Result<()> {
-        let seq = self.seq.fetch_add(1, Ordering::Relaxed);
-        let mut change = ConfChange::default();
-        change.set_node_id(node_id.to_string());
-        change.set_change_type(ConfChangeType::RemoveNode);
-        change.set_context(serialize(&self.id())?);
-        let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
-            Ok(_) => {
-                info!("request service proposal for removing node {}", node_id);
-                let change = RaftChange::RemoveNode {
+        if let Some(_) = self.inner.raft.prs().get(node_id.to_string()) {
+            // node does exist, remove it
+            let seq = self.seq.fetch_add(1, Ordering::Relaxed);
+            let mut change = ConfChange::default();
+            change.set_node_id(node_id.to_string());
+            change.set_change_type(ConfChangeType::RemoveNode);
+            change.set_context(serialize(&self.id())?);
+            let _ = self.propose_conf_change(serialize(&seq).unwrap(), change);
+        }
+
+        info!("request service proposal for removing node {}", node_id);
+        let _ = self
+            .snd
+            .clone()
+            .send(Message::ServiceProposalRequest {
+                request: serialize(&RaftChange::RemoveNode {
                     node_id: node_id.to_string(),
-                };
-                let r = self
-                    .snd
-                    .clone()
-                    .send(Message::ServiceProposalRequest {
-                        request: serialize(&change).unwrap(),
-                    })
-                    .await;
-                Ok(())
-            }
-            Err(_) => {
-                error!("failed to propose removing node {}", node_id);
-                Ok(())
-            }
-        };
-        ret
+                })
+                .unwrap(),
+            })
+            .await;
+        Ok(())
     }
 
     async fn propose_add_node(&mut self, node_id: &str) -> Result<()> {
