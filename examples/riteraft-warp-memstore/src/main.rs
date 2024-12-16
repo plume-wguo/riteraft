@@ -10,14 +10,14 @@ use riteraft::RaftChange;
 use riteraft::{Mailbox, Raft, Result as RaftResult, Store};
 use serde::{Deserialize, Serialize};
 use slog::Drain;
-use structopt::StructOpt;
-use warp::{reply, Filter};
-
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
+use structopt::StructOpt;
+use tokio::signal::unix::{signal, SignalKind};
+use warp::{reply, Filter};
 
 #[derive(Debug, StructOpt)]
 struct Options {
@@ -105,6 +105,23 @@ async fn leave(mailbox: Arc<Mailbox>) -> Result<impl warp::Reply, Infallible> {
     Ok(reply::json(&"OK".to_string()))
 }
 
+async fn handle_signals(mailbox: Arc<Mailbox>) {
+    let mut a = signal(SignalKind::interrupt()).unwrap();
+    let mut b = signal(SignalKind::terminate()).unwrap();
+    let mut c = signal(SignalKind::quit()).unwrap();
+    tokio::select! {
+        _ = a.recv() => {
+            let _ = mailbox.leave().await;
+        },
+        _ = b.recv() => {
+            let _ = mailbox.leave().await;
+        }
+        _ = c.recv() => {
+            let _ = mailbox.leave().await;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let decorator = slog_term::TermDecorator::new().build();
@@ -122,6 +139,8 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
     let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
     let mailbox = Arc::new(raft.mailbox());
+    let signal_handle = tokio::spawn(handle_signals(mailbox.clone()));
+
     let node = match options.peer_addr {
         Some(addr) => {
             info!("running in follower mode");
@@ -169,16 +188,22 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
             let command = deserialize(&request.inner.as_slice()).unwrap();
             match command {
                 RaftChange::AddNode { node_id: node_addr } => {
-                    info!("received add node service proposal callback");
+                    info!(
+                        "received add node service proposal callback for {}",
+                        &node_addr
+                    );
                 }
                 RaftChange::RemoveNode { node_id: node_addr } => {
-                    info!("received remove node service proposal callback");
+                    info!(
+                        "received remove node service proposal callback for {}",
+                        &node_addr
+                    );
                 }
             }
         }
     });
 
-    let result = tokio::try_join!(raft_handle)?;
+    let result = tokio::try_join!(raft_handle, signal_handle)?;
     result.0?;
     Ok(())
 }

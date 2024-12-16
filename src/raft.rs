@@ -128,7 +128,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// Create a new leader for the cluster. There has to be exactly one node in the
     /// cluster that is initialised that way
     pub async fn lead(self) -> Result<JoinHandle<Result<()>>> {
-        // pub async fn lead(self) -> Result<RaftNode<S>> {
         let addr = self.addr.clone();
         let node = RaftNode::new_leader(
             &self.addr,
@@ -148,7 +147,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
     /// `peers` is not the current leader of the cluster, it will use returned new addr
     /// join will try to remove this node and add again
     pub async fn join(self, peers: Vec<&str>) -> Result<JoinHandle<Result<()>>> {
-        // pub async fn join(self, peers: Vec<&str>) -> Result<RaftNode<S>> {
         info!(
             "{} attemping to join cluster with peers: {:?}",
             &self.addr, &peers
@@ -171,12 +169,13 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         let mut change = ConfChange::default();
         change.set_node_id(self.addr.clone());
         // try to remove node firstly
-        change.set_change_type(ConfChangeType::RemoveNode);
+        // change.set_change_type(ConfChangeType::RemoveNode);
+        change.set_change_type(ConfChangeType::AddNode);
         change.set_context(serialize(&self.addr)?);
         for addr in peers.clone() {
             let mut leader_addr = addr.to_string();
             loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
                 let ep = Endpoint::from_str(&format!("http://{}", leader_addr))
                     .unwrap()
                     .timeout(Duration::from_secs(2))
@@ -196,7 +195,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                                 continue;
                             }
                             ResultCode::NoLeader => {
-                                info!("no leader, continue after 5 seconds",);
+                                info!("no leader, continue after 2 seconds",);
                                 continue;
                             }
                             ResultCode::Ok => {

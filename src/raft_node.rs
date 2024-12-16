@@ -272,14 +272,19 @@ impl<S: Store + 'static + Send> RaftNode<S> {
     pub async fn run(mut self) -> Result<()> {
         let mut heartbeat = Duration::from_millis(100);
         let mut now = Instant::now();
+        let mut quit_tick = 0;
 
         // A map to contain sender to client responses
         let mut client_send = HashMap::new();
 
         loop {
             if self.should_quit {
-                warn!("Quitting raft");
-                return Ok(());
+                // ugly solution, give some time to cleanup, some external proposal need to happen
+                quit_tick += 1;
+                warn!("Quitting raft, ticking {}", quit_tick);
+                if quit_tick > 3 {
+                    return Ok(());
+                }
             }
             match timeout(heartbeat, self.rcv.recv()).await {
                 Ok(Some(Message::ConfigChange {
@@ -640,17 +645,18 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         change.set_context(serialize(&self.id())?);
         let ret = match self.propose_conf_change(serialize(&seq).unwrap(), change) {
             Ok(_) => {
-                info!("request service proposal for adding node {}", node_id);
-                let change = RaftChange::AddNode {
-                    node_id: node_id.to_string(),
-                };
-                let r = self
-                    .snd
-                    .clone()
-                    .send(Message::ServiceProposalRequest {
-                        request: serialize(&change).unwrap(),
-                    })
-                    .await;
+                // not sure if node is ready at this moment, let node to send request itself
+                // info!("request service proposal for adding node {}", node_id);
+                // let change = RaftChange::AddNode {
+                //     node_id: node_id.to_string(),
+                // };
+                // let _ = self
+                //     .snd
+                //     .clone()
+                //     .send(Message::ServiceProposalRequest {
+                //         request: serialize(&change).unwrap(),
+                //     })
+                //     .await;
                 Ok(())
             }
             Err(_) => {

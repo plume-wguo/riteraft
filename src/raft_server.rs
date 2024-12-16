@@ -134,8 +134,9 @@ impl RaftService for RaftServer {
         Ok(GrpcResponse::new(RaftServiceResponse::default()))
     }
 
-    /// send a request to a internal service registered to let service determine and send some proposal.
-    /// only leader node will make proposal, service should check if it's leader. internal service should use raft MailBox to send proposals
+    /// send a request to a internal service registered to let service determine and send proposals
+    /// into raft MailBox to broadcast to other nodes.
+    /// usually only leader node will make proposal, service should check if it's leader.
     async fn request_service_proposal(
         &self,
         request: Request<Proposal>,
