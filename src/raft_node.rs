@@ -131,7 +131,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
         store: S,
-        logger: &slog::Logger,
+        logger: Option<&slog::Logger>,
     ) -> Self {
         let config = Config {
             id: id.to_string(),
@@ -155,7 +155,11 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
         let mut storage = MemStorage::create();
         storage.apply_snapshot(s).unwrap();
-        let mut inner = RawNode::new(&config, storage, logger).unwrap();
+        let mut inner = if logger.is_some() {
+            RawNode::new(&config, storage, logger.unwrap()).unwrap()
+        } else {
+            RawNode::with_default_logger(&config, storage).unwrap()
+        };
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
         let last_snap_time = Instant::now();
@@ -180,7 +184,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         rcv: mpsc::Receiver<Message>,
         snd: mpsc::Sender<Message>,
         store: S,
-        logger: &slog::Logger,
+        logger: Option<&slog::Logger>,
     ) -> Result<Self> {
         let config = Config {
             id: id.to_string(),
@@ -205,7 +209,11 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         // storage.apply_snapshot(s).unwrap();
 
         let storage = MemStorage::create();
-        let inner = RawNode::new(&config, storage, logger)?;
+        let inner = if logger.is_some() {
+            RawNode::new(&config, storage, logger.unwrap()).unwrap()
+        } else {
+            RawNode::with_default_logger(&config, storage).unwrap()
+        };
         let peers = HashMap::new();
         let seq = AtomicU64::new(0);
         let last_snap_time = Instant::now()

@@ -137,7 +137,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
     let store = HashStore::new();
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(100);
-    let raft = Raft::new(&options.raft_addr, store.clone(), tx, logger.clone());
+    let raft = Raft::new(&options.raft_addr, store.clone(), tx, Some(logger.clone()));
     let mailbox = Arc::new(raft.mailbox());
     let signal_handle = tokio::spawn(handle_signals(mailbox.clone()));
 

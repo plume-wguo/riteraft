@@ -98,7 +98,7 @@ pub struct Raft<S: Store + 'static> {
     raft_node_tx: mpsc::Sender<Message>,
     raft_node_rx: mpsc::Receiver<Message>,
     addr: String,
-    logger: slog::Logger,
+    logger: Option<slog::Logger>,
 }
 
 impl<S: Store + Send + Sync + 'static> Raft<S> {
@@ -107,7 +107,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         addr: &str,
         store: S,
         proposal_service_tx: mpsc::Sender<ServiceProposalRequest>,
-        logger: slog::Logger,
+        logger: Option<slog::Logger>,
     ) -> Self {
         let (tx, rx) = mpsc::channel(100);
         Self {
@@ -134,13 +134,12 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.raft_node_rx,
             self.raft_node_tx.clone(),
             self.store,
-            &self.logger,
+            self.logger.as_ref(),
         );
         let server = RaftServer::new(self.raft_node_tx, self.proposal_service_tx, addr);
         let _server_handle = tokio::spawn(server.run());
         let node_handle = tokio::spawn(node.run());
         Ok(node_handle)
-        // Ok(node)
     }
 
     /// Try using node addr as an id to join cluster at `peers`, or finding it if
@@ -162,7 +161,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
             self.raft_node_rx,
             self.raft_node_tx.clone(),
             self.store,
-            &self.logger,
+            self.logger.as_ref(),
         )
         .unwrap();
         let handle = tokio::spawn(node.run());
