@@ -198,15 +198,15 @@ impl<S: Store + 'static + Send> RaftNode<S> {
 
         config.validate().unwrap();
 
-        // let mut s = Snapshot::default();
+        let mut s = Snapshot::default();
         // // Because we don't use the same configuration to initialize every node, so we use
         // // a non-zero index to force new followers catch up logs by snapshot first, which will
         // // bring all nodes to the same initial state.
-        // s.mut_metadata().index = 1;
-        // s.mut_metadata().term = 1;
-        // s.mut_metadata().mut_conf_state().voters = vec![id.clone()];
-        // let mut storage = MemStorage::create();
-        // storage.apply_snapshot(s).unwrap();
+        s.mut_metadata().index = 1;
+        s.mut_metadata().term = 1;
+        s.mut_metadata().mut_conf_state().voters = vec![id.to_string()];
+        let mut storage = MemStorage::create();
+        storage.apply_snapshot(s).unwrap();
 
         let storage = MemStorage::create();
         let inner = if logger.is_some() {
@@ -327,7 +327,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::Raft(m))) => {
-                    debug!(
+                    info!(
                         "as {:?}, step raft message: {:?}, {:?}, ",
                         &self.raft.state,
                         &m,
@@ -336,7 +336,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     if let Ok(_a) = self.step(*m) {};
                 }
                 Ok(Some(Message::Leave { reply_chan })) => {
-                    debug!("as {:?}, received leave message", &self.raft.state,);
+                    info!("as {:?}, received leave message", &self.raft.state,);
                     let node_id = self.id().to_string();
                     let leader_addr = self.leader().to_string();
                     let is_leader = self.is_leader();
@@ -360,7 +360,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::ServiceProposalRequest { request })) => {
-                    debug!(
+                    info!(
                         "as {:?}, received request service proposal message",
                         &self.raft.state,
                     );
@@ -387,7 +387,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     }
                 }
                 Ok(Some(Message::RaftState { reply_chan })) => {
-                    debug!("as {:?}, received role state message", &self.raft.state);
+                    info!("as {:?}, received role state message", &self.raft.state);
                     let raft_response = Response::RaftState {
                         role: RaftRole::from(self.raft.state),
                         leader_id: self.leader().to_string(),
@@ -398,7 +398,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     proposal,
                     reply_chan,
                 })) => {
-                    debug!(
+                    info!(
                         "as {:?}, received propose message: {:?}",
                         &self.raft.state, &proposal
                     );
