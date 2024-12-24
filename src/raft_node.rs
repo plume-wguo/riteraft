@@ -340,24 +340,24 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                     let node_id = self.id().to_string();
                     let leader_addr = self.leader().to_string();
                     let is_leader = self.is_leader();
-                    if leader_addr != "" {
-                        if !is_leader {
-                            let mut change = ConfChange::default();
-                            change.set_node_id(node_id);
-                            change.set_change_type(ConfChangeType::RemoveNode);
-                            if let Some(p) = self.peer_mut(&leader_addr) {
-                                let _ = p.client.change_config(Request::new(change.clone())).await;
-                                let _ = reply_chan.send(Response::Ok);
-                            } else {
-                                let _ = reply_chan.send(Response::NoLeader {
-                                    peer_addrs: self.peer_addrs(),
-                                });
-                            };
-                        } else {
-                            self.propose_remove_node(&node_id).await?;
-                            let _ = reply_chan.send(Response::Ok);
-                        }
-                    }
+                    // if leader_addr != "" {
+                    //     if !is_leader {
+                    //         let mut change = ConfChange::default();
+                    //         change.set_node_id(node_id);
+                    //         change.set_change_type(ConfChangeType::RemoveNode);
+                    //         if let Some(p) = self.peer_mut(&leader_addr) {
+                    //             let _ = p.client.change_config(Request::new(change.clone())).await;
+                    //             let _ = reply_chan.send(Response::Ok);
+                    //         } else {
+                    //             let _ = reply_chan.send(Response::NoLeader {
+                    //                 peer_addrs: self.peer_addrs(),
+                    //             });
+                    //         };
+                    //     } else {
+                    self.propose_remove_node(&node_id).await?;
+                    let _ = reply_chan.send(Response::Ok);
+                    //     }
+                    // }
                 }
                 Ok(Some(Message::ServiceProposalRequest { request })) => {
                     info!(
