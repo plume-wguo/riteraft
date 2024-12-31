@@ -109,7 +109,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         proposal_service_tx: mpsc::Sender<ServiceProposalRequest>,
         logger: Option<slog::Logger>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(100);
+        let (tx, rx) = mpsc::channel(1000);
         Self {
             store,
             proposal_service_tx,
@@ -173,6 +173,7 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
         change.set_context(serialize(&self.addr)?);
         for addr in peers.clone() {
             let mut leader_addr = addr.to_string();
+            info!("join with peer at {}", leader_addr);
             loop {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 let ep = Endpoint::from_str(&format!("http://{}", leader_addr))
@@ -185,12 +186,11 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                             .change_config(Request::new(change.clone()))
                             .await?
                             .into_inner();
-                        info!("received change_config api response: {}", &response.code);
                         match response.code() {
                             ResultCode::WrongLeader => {
                                 let addr: String = deserialize(&response.data)?;
                                 leader_addr = addr;
-                                info!("rejoin with new leader at {}", leader_addr);
+                                info!("get leader addr at {}, rejoin", leader_addr);
                                 continue;
                             }
                             ResultCode::NoLeader => {
@@ -200,7 +200,6 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                             ResultCode::Ok => {
                                 if change.change_type == ConfChangeType::AddNode as i32 {
                                     info!("join successfully with leader at {}", leader_addr);
-                                    // return Ok(node);
                                     return Ok(handle);
                                 } else if change.change_type == ConfChangeType::RemoveNode as i32 {
                                     // removed node, add node again

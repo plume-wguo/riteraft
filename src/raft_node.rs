@@ -39,12 +39,12 @@ impl MessageSender {
         loop {
             let message_request = Request::new(self.message.clone());
             match self.client.send_raft_message(message_request).await {
-                Ok(e) => {
-                    debug!(
-                        "send raft message {:?} get {:?}",
-                        self.message,
-                        e.into_inner()
-                    );
+                Ok(_) => {
+                    // debug!(
+                    //     "send raft message {:?} get {:?}",
+                    //     self.message,
+                    //     e.into_inner()
+                    // );
                     return;
                 }
                 Err(e) => {
