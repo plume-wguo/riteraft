@@ -40,11 +40,6 @@ impl MessageSender {
             let message_request = Request::new(self.message.clone());
             match self.client.send_raft_message(message_request).await {
                 Ok(_) => {
-                    // debug!(
-                    //     "send raft message {:?} get {:?}",
-                    //     self.message,
-                    //     e.into_inner()
-                    // );
                     return;
                 }
                 Err(e) => {
@@ -312,7 +307,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                         let raft_response = Response::NoLeader {
                             peer_addrs: self.peer_addrs(),
                         };
-                        let _ = self.inner.campaign();
+                        // let _ = self.inner.campaign();
                         let _ = reply_chan.send(raft_response);
                     } else if !self.is_leader() {
                         self.send_wrong_leader(reply_chan);

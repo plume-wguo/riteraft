@@ -193,10 +193,10 @@ impl<S: Store + Send + Sync + 'static> Raft<S> {
                                 info!("get leader addr at {}, rejoin", leader_addr);
                                 continue;
                             }
-                            ResultCode::NoLeader => {
-                                info!("no leader, continue after 2 seconds",);
-                                continue;
-                            }
+                            // ResultCode::NoLeader => {
+                            //     info!("no leader, continue after 2 seconds",);
+                            //     continue;
+                            // }
                             ResultCode::Ok => {
                                 if change.change_type == ConfChangeType::AddNode as i32 {
                                     info!("join successfully with leader at {}", leader_addr);
