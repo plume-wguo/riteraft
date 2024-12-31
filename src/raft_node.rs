@@ -65,10 +65,19 @@ impl MessageSender {
     }
 }
 
+pub struct PeerStatus {
+    unreachable_cnt: u8,
+}
+impl PeerStatus {
+    pub fn inc_get_unreachble_cnt(&mut self) -> u8 {
+        self.unreachable_cnt += 1;
+        self.unreachable_cnt
+    }
+}
+
 pub struct Peer {
     addr: String,
     client: RaftServiceClient<Channel>,
-    unreachable_cnt: u8,
 }
 
 impl Deref for Peer {
@@ -98,13 +107,7 @@ impl Peer {
         Ok(Peer {
             addr: addr.to_string(),
             client,
-            unreachable_cnt: 0,
         })
-    }
-
-    pub fn inc_get_unreachble_cnt(&mut self) -> u8 {
-        self.unreachable_cnt += 1;
-        self.unreachable_cnt
     }
 }
 
@@ -112,6 +115,7 @@ pub struct RaftNode<S: Store> {
     inner: RawNode<MemStorage>,
     // the peer is optional, because an id can be reserved and later populated
     pub peers: HashMap<String, Option<Peer>>,
+    pub peers_status: HashMap<String, PeerStatus>,
     pub rcv: mpsc::Receiver<Message>,
     pub snd: mpsc::Sender<Message>,
     store: S,
@@ -156,6 +160,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             RawNode::with_default_logger(&config, storage).unwrap()
         };
         let peers = HashMap::new();
+        let peers_status = HashMap::new();
         let seq = AtomicU64::new(0);
         let last_snap_time = Instant::now();
 
@@ -166,6 +171,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             inner,
             rcv,
             peers,
+            peers_status,
             store,
             seq,
             snd,
@@ -210,6 +216,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             RawNode::with_default_logger(&config, storage).unwrap()
         };
         let peers = HashMap::new();
+        let peers_status = HashMap::new();
         let seq = AtomicU64::new(0);
         let last_snap_time = Instant::now()
             .checked_sub(Duration::from_secs(1000))
@@ -219,12 +226,26 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             inner,
             rcv,
             peers,
+            peers_status,
             store,
             seq,
             snd,
             should_quit: false,
             last_snap_time,
         })
+    }
+
+    pub fn add_peer_status(&mut self, addr: &str) -> &mut PeerStatus {
+        let p = PeerStatus { unreachable_cnt: 0 };
+        self.peers_status.insert(addr.to_string(), p);
+        self.peers_status.get_mut(addr).unwrap()
+    }
+
+    pub fn peer_status_mut(&mut self, addr: &str) -> Option<&mut PeerStatus> {
+        match self.peers_status.get_mut(addr) {
+            None => None,
+            Some(v) => Some(v),
+        }
     }
 
     pub fn peer_mut(&mut self, id: &str) -> Option<&mut Peer> {
@@ -412,11 +433,13 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                         &self.raft.state, &node_id
                     );
                     self.report_unreachable(node_id.clone());
-                    if let Some(peer) = self.peer_mut(&node_id) {
-                        let cnt = peer.inc_get_unreachble_cnt();
-                        if cnt > 10 {
-                            let _ = self.propose_remove_node(&node_id).await;
-                        }
+                    let peer = match self.peer_status_mut(&node_id) {
+                        Some(v) => v,
+                        None => self.add_peer_status(&node_id),
+                    };
+                    let cnt = peer.inc_get_unreachble_cnt();
+                    if cnt > 10 {
+                        let _ = self.propose_remove_node(&node_id).await;
                     }
                 }
                 Ok(_) => unreachable!(),
@@ -504,7 +527,15 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                 Some(ref peer) => peer.client.clone(),
                 None => match self.add_peer(to_addr).await {
                     Ok(_) => self.peer_mut(to_addr).unwrap().client.clone(),
-                    Err(_) => continue,
+                    Err(_) => {
+                        let _ = self
+                            .snd
+                            .send(Message::ReportUnreachable {
+                                node_id: to_addr.to_string(),
+                            })
+                            .await;
+                        continue;
+                    }
                 },
             };
             let message_sender = MessageSender {
@@ -586,7 +617,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
                 _ => unimplemented!(),
             };
             if sender.send(response).is_err() {
-                error!("error sending response")
+                error!("error sending back config change response")
             }
         }
         Ok(())
@@ -600,7 +631,7 @@ impl<S: Store + 'static + Send> RaftNode<S> {
         let seq: u64 = deserialize(entry.get_context())?;
         let data = self.store.apply(entry.get_data()).await?;
         if let Some(sender) = senders.remove(&seq) {
-            sender.send(Response::Response { data }).unwrap();
+            let _ = sender.send(Response::Response { data });
         }
 
         if Instant::now() > self.last_snap_time + Duration::from_secs(15) {
@@ -609,8 +640,9 @@ impl<S: Store + 'static + Send> RaftNode<S> {
             let last_applied = self.raft.raft_log.applied;
             let snapshot = self.store.snapshot().await?;
             let store = self.mut_store();
-            store.compact(last_applied).unwrap();
-            let _ = store.create_snapshot(snapshot);
+            if store.compact(last_applied).is_ok() {
+                let _ = store.create_snapshot(snapshot);
+            }
         }
         Ok(())
     }
