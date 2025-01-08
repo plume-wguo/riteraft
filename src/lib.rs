@@ -10,6 +10,6 @@ mod storage;
 extern crate async_trait;
 
 pub use crate::error::{Error, Result};
-pub use crate::message::{RaftChange, RaftRole};
+pub use crate::message::{NodeState, RaftChange, RaftRole};
 pub use crate::raft::{Mailbox, Raft, ServiceProposalRequest, Store};
 pub use async_trait::async_trait;

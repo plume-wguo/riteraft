@@ -8,8 +8,23 @@ use tokio::sync::oneshot::Sender;
 /// copy of raft AddNode and RemoveNode ConfChange, because original struct is not de/serializable
 #[derive(Serialize, Deserialize, Debug)]
 pub enum RaftChange {
-    AddNode { node_id: String },
-    RemoveNode { node_id: String },
+    AddNode {
+        node_id: String,
+    },
+    RemoveNode {
+        node_id: String,
+    },
+    NodeState {
+        node_id: String,
+        node_state: NodeState,
+    },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub enum NodeState {
+    Quitting,
+    Running,
+    Probing,
 }
 
 /// copy of raft role. because original struct is not de/serializable
